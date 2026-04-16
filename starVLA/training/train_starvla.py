@@ -409,6 +409,9 @@ def main(cfg) -> None:
 
     output_dir = setup_directories(cfg=cfg)
     vla = build_framework(cfg)
+    print('111111111', vla)
+    print('222222222', cfg)
+
     vla_train_dataloader = prepare_data(cfg=cfg, accelerator=accelerator, output_dir=output_dir)
     optimizer, lr_scheduler = setup_optimizer_and_scheduler(model=vla, cfg=cfg)
 
