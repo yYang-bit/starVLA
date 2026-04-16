@@ -21,7 +21,7 @@ framework:
     action_hidden_dim: 2560
     add_pos_embed: True
     max_seq_len: 1024
-    action_dim: 7
+    action_dim: 10
     state_dim: 7
     future_action_window_size: 15
     action_horizon: 16
@@ -73,6 +73,7 @@ datasets:
     obs: ["image_0"]
     image_size: [224,224]
     video_backend: torchvision_av
+    action_chunk_representation: relative_pose_6d
     
 trainer:
   epochs: 100

@@ -4,6 +4,7 @@ from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
 from starVLA.dataloader.gr00t_lerobot.transform.concat import ConcatTransform
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
+    RelativePoseActionTransform,
     StateActionToTensor,
     StateActionTransform,
 )
@@ -48,7 +49,34 @@ class OxeDroidDataConfig:
             "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
         }
 
-    def transform(self):
+    def transform(self, data_cfg=None):
+        action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
+        if action_repr == "relative_pose_6d":
+            return ComposedModalityTransform(transforms=[
+                VideoToTensor(apply_to=self.video_keys),
+                VideoCrop(apply_to=self.video_keys, scale=0.95),
+                VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
+                VideoColorJitter(apply_to=self.video_keys, brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
+                VideoToNumpy(apply_to=self.video_keys),
+                StateActionToTensor(apply_to=self.state_keys),
+                StateActionTransform(
+                    apply_to=self.state_keys,
+                    normalization_modes={"state.eef_position": "min_max", "state.gripper_position": "min_max"},
+                    target_rotations={"state.eef_rotation": "rotation_6d"},
+                ),
+                RelativePoseActionTransform(
+                    apply_to=self.state_keys + self.action_keys,
+                    state_keys=self.state_keys,
+                    action_keys=self.action_keys,
+                    output_key="action.relative_pose_6d",
+                ),
+                StateActionToTensor(apply_to=["action.relative_pose_6d"]),
+                StateActionTransform(
+                    apply_to=["action.relative_pose_6d"],
+                    normalization_modes={"action.relative_pose_6d": "min_max"},
+                ),
+            ])
+
         return ComposedModalityTransform(transforms=[
             VideoToTensor(apply_to=self.video_keys),
             VideoCrop(apply_to=self.video_keys, scale=0.95),
@@ -102,7 +130,23 @@ class OxeBridgeDataConfig:
             "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
         }
 
-    def transform(self):
+    def transform(self, data_cfg=None):
+        action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
+        if action_repr == "relative_pose_6d":
+            return ComposedModalityTransform(transforms=[
+                RelativePoseActionTransform(
+                    apply_to=self.state_keys + self.action_keys,
+                    state_keys=self.state_keys,
+                    action_keys=self.action_keys,
+                    output_key="action.relative_pose_6d",
+                ),
+                StateActionToTensor(apply_to=["action.relative_pose_6d"]),
+                StateActionTransform(
+                    apply_to=["action.relative_pose_6d"],
+                    normalization_modes={"action.relative_pose_6d": "min_max"},
+                ),
+            ])
+
         return ComposedModalityTransform(transforms=[
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(
@@ -144,7 +188,23 @@ class OxeRT1DataConfig:
             "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
         }
 
-    def transform(self):
+    def transform(self, data_cfg=None):
+        action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
+        if action_repr == "relative_pose_6d":
+            return ComposedModalityTransform(transforms=[
+                RelativePoseActionTransform(
+                    apply_to=self.state_keys + self.action_keys,
+                    state_keys=self.state_keys,
+                    action_keys=self.action_keys,
+                    output_key="action.relative_pose_6d",
+                ),
+                StateActionToTensor(apply_to=["action.relative_pose_6d"]),
+                StateActionTransform(
+                    apply_to=["action.relative_pose_6d"],
+                    normalization_modes={"action.relative_pose_6d": "min_max"},
+                ),
+            ])
+
         return ComposedModalityTransform(transforms=[
             StateActionToTensor(apply_to=self.state_keys),
             StateActionTransform(

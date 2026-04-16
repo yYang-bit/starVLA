@@ -10,7 +10,7 @@ is_debug: false
 framework:
   name: QwenGR00T
   qwenvl:
-    base_vlm: ./playground/Pretrained_models/Qwen2.5-VL-3B-Instruct-Action
+    base_vlm: ../playground/Pretrained_models/Qwen3-VL-4B-Instruct
     attn_implementation: flash_attention_2
     vl_hidden_dim: 2048
   dino:
@@ -21,10 +21,10 @@ framework:
     hidden_size: 1024     
     add_pos_embed: True
     max_seq_len: 1024
-    action_dim: 7
-    state_dim: 7
-    future_action_window_size: 7
-    action_horizon: 8 # need merge with future_action_window_size 
+    action_dim: 10
+    state_dim: 10
+    future_action_window_size: 16
+    action_horizon: 16 # need merge with future_action_window_size 
     past_action_window_size: 0
     repeated_diffusion_steps: 8
     noise_beta_alpha: 1.5

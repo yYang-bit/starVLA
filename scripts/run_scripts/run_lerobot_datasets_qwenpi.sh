@@ -1,5 +1,8 @@
-export NCCL_SOCKET_IFNAME=bond0
-export NCCL_IB_HCA=mlx5_2,mlx5_3
+# export NCCL_SOCKET_IFNAME=bond0
+# export NCCL_IB_HCA=mlx5_2,mlx5_3
+export NCCL_IB_DISABLE=1
+export NCCL_DEBUG=INFO
+export NCCL_DEBUG_SUBSYS=INIT
 
 export NCCL_BLOCKING_WAIT=1
 export NCCL_ASYNC_ERROR_HANDLING=1
@@ -10,10 +13,10 @@ export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
 ###########################################################################################
 
 Framework_name=QwenPI
-base_vlm=StarVLA/Qwen2.5-VL-3B-Instruct-Action
+base_vlm=/mnt/home/yangzhibo/playground/Pretrained_models/Qwen3-VL-4B-Instruct
 DIT_TYPE="DiT-B"
-oxe_data_root=playground/Datasets/OXE_LEROBOT
-data_mix=bridge_rt_1
+oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
+data_mix=my_mix
 run_root_dir=./playground/Checkpoints
 run_id=1011_starvla_qwenpi
 export action_input_dim=2048
@@ -28,7 +31,7 @@ cp $0 ${output_dir}/
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 8 \
+  --num_processes 2 \
   starVLA/training/train_starvla.py \
   --config_yaml ./starVLA/config/training/starvla_cotrain_oxe.yaml \
   --framework.name ${Framework_name} \

@@ -258,6 +258,248 @@ class StateActionToTensor(InvertibleModalityTransform):
         return data
 
 
+class RelativePoseActionTransform(ModalityTransform):
+    """Build a relative-pose action chunk from raw state/action pose sequences."""
+
+    state_keys: list[str] = Field(..., description="State keys required to recover the current end-effector pose.")
+    action_keys: list[str] = Field(..., description="Action keys required to recover the action pose trajectory.")
+    output_key: str = Field(default="action.relative_pose_6d", description="Key used to store the transformed action.")
+    include_gripper: bool = Field(default=True, description="Whether to append gripper state to the output action.")
+    arm_prefixes: list[str] = Field(default_factory=list, description="Optional arm prefixes for multi-arm pose parsing.")
+    state_position_suffix: str = Field(default="_abs_pos", description="Per-arm state position suffix.")
+    state_rotation_suffix: str = Field(default="_abs_ori_6d", description="Per-arm state rotation suffix.")
+    state_gripper_suffix: str = Field(default="_gripper", description="Per-arm state gripper suffix.")
+    action_position_suffix: str = Field(default="_abs_pos", description="Per-arm action position suffix.")
+    action_rotation_suffix: str = Field(default="_abs_ori_6d", description="Per-arm action rotation suffix.")
+    action_gripper_suffix: str = Field(default="_gripper", description="Per-arm action gripper suffix.")
+
+    def _to_numpy_array(self, value: Any) -> np.ndarray:
+        if isinstance(value, np.ndarray):
+            return value
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    def _get_modality_submeta(self, modality: str, key: str) -> StateActionMetadata:
+        assert key.startswith(f"{modality}.")
+        subkey = key.replace(f"{modality}.", "", 1)
+        return getattr(self.dataset_metadata.modalities, modality)[subkey]
+
+    @staticmethod
+    def _infer_rotation_type_from_key(key: str, rotation_type: str | None) -> str | None:
+        if rotation_type is not None:
+            return str(rotation_type)
+
+        lowered = key.lower()
+        if "ori_6d" in lowered or "rotation_6d" in lowered:
+            return "rotation_6d"
+        if "quaternion" in lowered or lowered.endswith("_quat"):
+            return "quaternion"
+        if any(token in lowered for token in ("roll", "pitch", "yaw", "euler")):
+            return "euler_angles_rpy"
+        return rotation_type
+
+    def _rotation_array_to_matrix(self, rotation_values: np.ndarray, rotation_type: str | None) -> np.ndarray:
+        rotation_values = rotation_values.astype(np.float32)
+        if rotation_type is None:
+            raise ValueError("Rotation type is required to convert rotation values to matrices.")
+
+        rotation_type = str(rotation_type)
+        tensor = torch.from_numpy(rotation_values)
+        if rotation_type == "axis_angle":
+            matrix = pt.axis_angle_to_matrix(tensor)
+        elif rotation_type == "quaternion":
+            matrix = pt.quaternion_to_matrix(tensor)
+        elif rotation_type == "rotation_6d":
+            matrix = pt.rotation_6d_to_matrix(tensor)
+        elif rotation_type == "matrix":
+            matrix = tensor
+        elif rotation_type.startswith("euler_angles_"):
+            convention = rotation_type.split("euler_angles_")[-1].upper().replace("R", "X").replace("P", "Y").replace(
+                "Y", "Z"
+            )
+            matrix = pt.euler_angles_to_matrix(tensor, convention=convention)
+        else:
+            raise ValueError(f"Unsupported rotation type: {rotation_type}")
+        return matrix.detach().cpu().numpy().astype(np.float32)
+
+    def _extract_arm_pose_sequence(self, data: dict, modality: str, arm_prefix: str) -> dict[str, np.ndarray] | None:
+        keys = self.state_keys if modality == "state" else self.action_keys
+        prefix = f"{modality}."
+        position_suffix = self.state_position_suffix if modality == "state" else self.action_position_suffix
+        rotation_suffix = self.state_rotation_suffix if modality == "state" else self.action_rotation_suffix
+        gripper_suffix = self.state_gripper_suffix if modality == "state" else self.action_gripper_suffix
+
+        position_key = f"{prefix}{arm_prefix}{position_suffix}"
+        rotation_key = f"{prefix}{arm_prefix}{rotation_suffix}"
+        gripper_key = f"{prefix}{arm_prefix}{gripper_suffix}"
+
+        if position_key not in keys or position_key not in data or rotation_key not in keys or rotation_key not in data:
+            return None
+
+        pos = self._to_numpy_array(data[position_key]).astype(np.float32)
+        rot_vals = self._to_numpy_array(data[rotation_key]).astype(np.float32)
+        rot_meta = self._get_modality_submeta(modality, rotation_key)
+        rotation_type = self._infer_rotation_type_from_key(
+            rotation_key, rot_meta.rotation_type.value if rot_meta.rotation_type else None
+        )
+        rot = self._rotation_array_to_matrix(rot_vals, rotation_type)
+        pos_meta = self._get_modality_submeta(modality, position_key)
+        gripper = self._to_numpy_array(data[gripper_key]).astype(np.float32) if gripper_key in keys and gripper_key in data else None
+
+        return {"position": pos, "rotation": rot, "gripper": gripper, "absolute": pos_meta.absolute}
+
+    def _extract_pose_sequence(self, data: dict, modality: str, keys: list[str]) -> dict[str, np.ndarray] | None:
+        if self.arm_prefixes:
+            arm_poses = [self._extract_arm_pose_sequence(data, modality, arm_prefix) for arm_prefix in self.arm_prefixes]
+            if any(pose is None for pose in arm_poses):
+                return None
+
+            assert arm_poses
+            return {
+                "position": np.concatenate([pose["position"] for pose in arm_poses if pose is not None], axis=-1),
+                "rotation": np.concatenate([pose["rotation"] for pose in arm_poses if pose is not None], axis=1),
+                "gripper": np.concatenate(
+                    [
+                        pose["gripper"] if pose["gripper"] is not None else np.zeros((pose["position"].shape[0], 1), dtype=np.float32)
+                        for pose in arm_poses
+                        if pose is not None
+                    ],
+                    axis=-1,
+                ),
+                "absolute": all(bool(pose["absolute"]) for pose in arm_poses if pose is not None),
+            }
+
+        prefix = f"{modality}."
+        pose = None
+
+        def has(name: str) -> bool:
+            return f"{prefix}{name}" in keys and f"{prefix}{name}" in data
+
+        position_candidates = (
+            ("eef_position",),
+            ("delta_eef_position",),
+            ("eef_position_delta",),
+            ("x", "y", "z"),
+        )
+        rotation_candidates = (
+            ("eef_rotation",),
+            ("delta_eef_rotation",),
+            ("eef_rotation_delta",),
+            ("roll", "pitch", "yaw"),
+        )
+
+        for names in position_candidates:
+            if not all(has(name) for name in names):
+                continue
+            full_keys = [f"{prefix}{name}" for name in names]
+            pos = np.concatenate([self._to_numpy_array(data[key]).astype(np.float32) for key in full_keys], axis=-1)
+            pos_meta = self._get_modality_submeta(modality, full_keys[0])
+            absolute = pos_meta.absolute
+            gripper = None
+            for name in ("gripper_position", "gripper_close", "gripper"):
+                full_key = f"{prefix}{name}"
+                if full_key in keys and full_key in data:
+                    gripper = self._to_numpy_array(data[full_key]).astype(np.float32)
+                    break
+            pose = {"position": pos, "absolute": absolute, "gripper": gripper}
+            break
+
+        if pose is None:
+            return None
+
+        for names in rotation_candidates:
+            if not all(has(name) for name in names):
+                continue
+            full_keys = [f"{prefix}{name}" for name in names]
+            rot_vals = np.concatenate([self._to_numpy_array(data[key]).astype(np.float32) for key in full_keys], axis=-1)
+            rot_meta = self._get_modality_submeta(modality, full_keys[0])
+            pose["rotation"] = self._rotation_array_to_matrix(
+                rot_vals,
+                self._infer_rotation_type_from_key(
+                    full_keys[0], rot_meta.rotation_type.value if rot_meta.rotation_type else None
+                ),
+            )
+            return pose
+
+        position_name = next((name for name in ("eef_position", "delta_eef_position", "eef_position_delta") if has(name)), None)
+        rotation_name = next((name for name in ("eef_rotation", "delta_eef_rotation", "eef_rotation_delta") if has(name)), None)
+        if position_name is not None and rotation_name is not None:
+            position_key = f"{prefix}{position_name}"
+            rotation_key = f"{prefix}{rotation_name}"
+            pos = self._to_numpy_array(data[position_key]).astype(np.float32)
+            rot_meta = self._get_modality_submeta(modality, rotation_key)
+            rot_vals = self._to_numpy_array(data[rotation_key]).astype(np.float32)
+            rot = self._rotation_array_to_matrix(
+                rot_vals,
+                self._infer_rotation_type_from_key(rotation_key, rot_meta.rotation_type.value if rot_meta.rotation_type else None),
+            )
+            pos_meta = self._get_modality_submeta(modality, position_key)
+            absolute = pos_meta.absolute
+            gripper = None
+            for name in ("gripper_position", "gripper_close", "gripper"):
+                full_key = f"{prefix}{name}"
+                if full_key in keys and full_key in data:
+                    gripper = self._to_numpy_array(data[full_key]).astype(np.float32)
+                    break
+            return {"position": pos, "rotation": rot, "gripper": gripper, "absolute": absolute}
+
+        return None
+
+    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        state_pose = self._extract_pose_sequence(data, modality="state", keys=self.state_keys)
+        action_pose = self._extract_pose_sequence(data, modality="action", keys=self.action_keys)
+        if state_pose is None or action_pose is None:
+            return data
+
+        init_pos = state_pose["position"][-1]
+        init_rot = state_pose["rotation"][-1]
+        init_rot_inv = init_rot.T
+
+        if action_pose["absolute"]:
+            position_abs = action_pose["position"]
+            rotation_abs = action_pose["rotation"]
+        else:
+            position_abs = init_pos[None, :] + np.cumsum(action_pose["position"], axis=0)
+            rotation_abs = np.zeros_like(action_pose["rotation"], dtype=np.float32)
+            running_rot = init_rot.astype(np.float32)
+            for idx, delta_rot in enumerate(action_pose["rotation"]):
+                running_rot = running_rot @ delta_rot
+                rotation_abs[idx] = running_rot
+
+        rel_pos_world = position_abs - init_pos[None, :]
+        rel_pos = (init_rot_inv @ rel_pos_world.T).T.astype(np.float32)
+        #单臂 or bimanual
+        if init_rot.ndim == 2:
+            rel_rot = np.einsum("ij,tjk->tik", init_rot_inv, rotation_abs).astype(np.float32)
+            rel_rot_6d = pt.matrix_to_rotation_6d(torch.from_numpy(rel_rot)).detach().cpu().numpy().astype(np.float32)
+        else:
+            #6D rotation = rotation matrix 的前两列（column-wise）
+            rel_rot = np.einsum("aij,tajk->taik", init_rot_inv, rotation_abs).astype(np.float32)
+            rel_rot_6d = (
+                pt.matrix_to_rotation_6d(torch.from_numpy(rel_rot.reshape(-1, 3, 3)))
+                .detach()
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+                .reshape(rel_rot.shape[0], -1)
+            )
+
+        components = [rel_pos, rel_rot_6d]
+        if self.include_gripper:
+            gripper = action_pose["gripper"]
+            if gripper is None:
+                gripper = np.zeros((rel_pos.shape[0], 1), dtype=np.float32)
+            elif gripper.ndim == 1:
+                gripper = gripper[:, None]
+            elif gripper.ndim == 2 and gripper.shape[-1] != 1:
+                gripper = gripper[..., :1]
+            components.append(gripper.astype(np.float32))
+
+        data[self.output_key] = np.concatenate(components, axis=-1)
+        return data
+
+
 class StateActionTransform(InvertibleModalityTransform):
     """
     Class for state or action transform.

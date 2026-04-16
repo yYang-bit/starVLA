@@ -9,6 +9,7 @@ from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform, ModalityTransform
 from starVLA.dataloader.gr00t_lerobot.transform.concat import ConcatTransform
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
+    RelativePoseActionTransform,
     StateActionSinCosTransform,
     StateActionToTensor,
     StateActionTransform,
@@ -30,7 +31,7 @@ class BaseDataConfig(ABC):
         pass
 
     @abstractmethod
-    def transform(self) -> ModalityTransform:
+    def transform(self, data_cfg=None) -> ModalityTransform:
         pass
 
 
@@ -93,7 +94,24 @@ class Libero4in1DataConfig:
         }
         return modality_configs
 
-    def transform(self):
+    def transform(self, data_cfg=None):
+        action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
+        if action_repr == "relative_pose_6d":
+            transforms = [
+                RelativePoseActionTransform(
+                    apply_to=self.state_keys + self.action_keys,
+                    state_keys=self.state_keys,
+                    action_keys=self.action_keys,
+                    output_key="action.relative_pose_6d",
+                ),
+                StateActionToTensor(apply_to=["action.relative_pose_6d"]),
+                StateActionTransform(
+                    apply_to=["action.relative_pose_6d"],
+                    normalization_modes={"action.relative_pose_6d": "min_max"},
+                ),
+            ]
+            return ComposedModalityTransform(transforms=transforms)
+
         transforms = [
             # action transforms
             StateActionToTensor(apply_to=self.action_keys),

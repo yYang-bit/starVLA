@@ -5,6 +5,7 @@
 # Modification: [suport topdowm processing, suport param from config].
 
 from pathlib import Path
+import inspect
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -79,13 +80,17 @@ def make_LeRobotSingleDataset(
     :param data_root_dir: The root directory of the dataset.
     :param data_name: The name of the dataset.
     :param robot_type: The robot type config to use.
-    :param lerobot_version: Explicit lerobot version override ("v2.0" or "v3.0"). If None, auto-detected from dataset file structure.
+    :param lerobot_version: Kept for API compatibility. The underlying loader only supports LeRobot v3.0.
     :return: A LeRobotSingleDataset object.
     """
 
     data_config = ROBOT_TYPE_CONFIG_MAP[robot_type]
     modality_config = data_config.modality_config()
-    transforms = data_config.transform()
+    transform_signature = inspect.signature(data_config.transform)
+    if "data_cfg" in transform_signature.parameters:
+        transforms = data_config.transform(data_cfg=data_cfg)
+    else:
+        transforms = data_config.transform()
     dataset_path = data_root_dir / data_name
     if robot_type not in ROBOT_TYPE_TO_EMBODIMENT_TAG:
         print(

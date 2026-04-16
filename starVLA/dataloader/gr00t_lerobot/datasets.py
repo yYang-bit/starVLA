@@ -37,6 +37,8 @@ from typing import Sequence
 
 import numpy as np
 import pandas as pd
+import pytorch3d.transforms as pt
+import torch
 import torch.distributed as dist
 from PIL import Image
 from pydantic import BaseModel, Field, ValidationError
@@ -53,18 +55,16 @@ from starVLA.dataloader.gr00t_lerobot.schema import (
 from starVLA.dataloader.gr00t_lerobot.transform import ComposedModalityTransform
 from starVLA.dataloader.gr00t_lerobot.video import get_all_frames, get_frames_by_timestamps
 
-# LeRobot v2.0 dataset file names
 LE_ROBOT_MODALITY_FILENAME = "meta/modality.json"
-LE_ROBOT_EPISODE_FILENAME = "meta/episodes.jsonl"
-LE_ROBOT_TASKS_FILENAME = "meta/tasks.jsonl"
 LE_ROBOT_INFO_FILENAME = "meta/info.json"
-LE_ROBOT_STATS_FILENAME = "meta/stats_gr00t.json"
+LE_ROBOT_STATS_FILENAME = "meta/stats.json"
+LE_ROBOT_RELATIVE_POSE_STATS_FILENAME = "meta/relative_stats.json"
 LE_ROBOT_DATA_FILENAME = "data/*/*.parquet"
 LE_ROBOT_STEPS_FILENAME = "meta/steps.pkl"
 LE_ROBOT_STATS_FORMAT_VERSION = 2
 EPSILON = 5e-4
 
-#  LeRobot v3.0 dataset file names
+# LeRobot v3.0 dataset file names
 LE_ROBOT3_TASKS_FILENAME = "meta/tasks.parquet"
 LE_ROBOT3_EPISODE_FILENAME = "meta/episodes/*/*.parquet"
 
@@ -158,8 +158,7 @@ def _build_stats_cache_config(
 def _invalidate_legacy_stats_cache(stats_path: Path, reason: str) -> None:
     if not stats_path.exists():
         return
-    print(f"Removing stale dataset statistics cache at {stats_path}: {reason}")
-    stats_path.unlink()
+    print(f"Detected incompatible dataset statistics cache at {stats_path}: {reason}")
 
 
 def _load_stats_cache(
@@ -285,21 +284,10 @@ def _load_or_compute_statistics(
     )
     if le_statistics is not None:
         return le_statistics
-
-    le_statistics = _compute_statistics_for_mode(
-        parquet_paths=parquet_paths,
-        dataset_name=dataset_name,
-        action_mode=action_mode,
-        lerobot_modality_meta=lerobot_modality_meta,
-        action_keys_full=action_keys_full,
-        state_keys_full=state_keys_full,
-        action_indices=action_indices,
-        state_indices=state_indices,
-        action_mode_apply_keys=action_mode_apply_keys,
-        action_mode_state_map=action_mode_state_map,
+    raise FileNotFoundError(
+        f"Dataset statistics file is required but missing or incompatible: {stats_path}. "
+        "Please prepare the stats cache before loading this dataset."
     )
-    _save_stats_cache(stats_path, stats_cache_config, le_statistics)
-    return le_statistics
 
 
 def _get_action_col_slices(
@@ -541,6 +529,240 @@ def calculate_rel_action_statistics(
     return rel_stats
 
 
+def _to_numpy_array(value) -> np.ndarray:
+    if isinstance(value, np.ndarray):
+        return value
+    if isinstance(value, torch.Tensor):
+        return value.detach().cpu().numpy()
+    return np.asarray(value)
+
+
+def _rotation_array_to_matrix(rotation_values: np.ndarray, rotation_type: str | None) -> np.ndarray:
+    rotation_values = rotation_values.astype(np.float32)
+    if rotation_type is None:
+        raise ValueError("Rotation type is required to convert rotation values to matrices.")
+
+    tensor = torch.from_numpy(rotation_values)
+    if rotation_type == "axis_angle":
+        matrix = pt.axis_angle_to_matrix(tensor)
+    elif rotation_type == "quaternion":
+        matrix = pt.quaternion_to_matrix(tensor)
+    elif rotation_type == "rotation_6d":
+        matrix = pt.rotation_6d_to_matrix(tensor)
+    elif rotation_type == "matrix":
+        matrix = tensor
+    elif rotation_type.startswith("euler_angles_"):
+        convention = rotation_type.split("euler_angles_")[-1].upper().replace("R", "X").replace("P", "Y").replace("Y", "Z")
+        matrix = pt.euler_angles_to_matrix(tensor, convention=convention)
+    else:
+        raise ValueError(f"Unsupported rotation type: {rotation_type}")
+    return matrix.detach().cpu().numpy().astype(np.float32)
+
+
+def _extract_pose_sequence_from_sample(
+    data: dict[str, np.ndarray],
+    modality: str,
+    keys: list[str],
+    metadata: DatasetMetadata,
+) -> dict[str, np.ndarray] | None:
+    prefix = f"{modality}."
+    modality_meta = getattr(metadata.modalities, modality)
+
+    def get_meta(key: str):
+        subkey = key.replace(f"{modality}.", "", 1)
+        return modality_meta[subkey]
+
+    def has(name: str) -> bool:
+        return f"{prefix}{name}" in keys and f"{prefix}{name}" in data
+
+    position_candidates = (
+        ("eef_position",),
+        ("delta_eef_position",),
+        ("eef_position_delta",),
+        ("x", "y", "z"),
+    )
+    rotation_candidates = (
+        ("eef_rotation",),
+        ("delta_eef_rotation",),
+        ("eef_rotation_delta",),
+        ("roll", "pitch", "yaw"),
+    )
+
+    pose = None
+    for names in position_candidates:
+        if not all(has(name) for name in names):
+            continue
+        full_keys = [f"{prefix}{name}" for name in names]
+        pos = np.concatenate([_to_numpy_array(data[key]).astype(np.float32) for key in full_keys], axis=-1)
+        pos_meta = get_meta(full_keys[0])
+        gripper = None
+        for name in ("gripper_position", "gripper_close", "gripper"):
+            full_key = f"{prefix}{name}"
+            if full_key in keys and full_key in data:
+                gripper = _to_numpy_array(data[full_key]).astype(np.float32)
+                break
+        pose = {"position": pos, "absolute": pos_meta.absolute, "gripper": gripper}
+        break
+
+    if pose is None:
+        return None
+
+    for names in rotation_candidates:
+        if not all(has(name) for name in names):
+            continue
+        full_keys = [f"{prefix}{name}" for name in names]
+        rot_vals = np.concatenate([_to_numpy_array(data[key]).astype(np.float32) for key in full_keys], axis=-1)
+        rot_meta = get_meta(full_keys[0])
+        pose["rotation"] = _rotation_array_to_matrix(rot_vals, rot_meta.rotation_type.value if rot_meta.rotation_type else None)
+        return pose
+
+    position_name = next((name for name in ("eef_position", "delta_eef_position", "eef_position_delta") if has(name)), None)
+    rotation_name = next((name for name in ("eef_rotation", "delta_eef_rotation", "eef_rotation_delta") if has(name)), None)
+    if position_name is not None and rotation_name is not None:
+        position_key = f"{prefix}{position_name}"
+        rotation_key = f"{prefix}{rotation_name}"
+        pos = _to_numpy_array(data[position_key]).astype(np.float32)
+        rot_vals = _to_numpy_array(data[rotation_key]).astype(np.float32)
+        rot_meta = get_meta(rotation_key)
+        pos_meta = get_meta(position_key)
+        gripper = None
+        for name in ("gripper_position", "gripper_close", "gripper"):
+            full_key = f"{prefix}{name}"
+            if full_key in keys and full_key in data:
+                gripper = _to_numpy_array(data[full_key]).astype(np.float32)
+                break
+        return {
+            "position": pos,
+            "rotation": _rotation_array_to_matrix(rot_vals, rot_meta.rotation_type.value if rot_meta.rotation_type else None),
+            "gripper": gripper,
+            "absolute": pos_meta.absolute,
+        }
+
+    return None
+
+
+def _build_relative_pose_action_from_sample(
+    data: dict[str, np.ndarray],
+    metadata: DatasetMetadata,
+    state_keys: list[str],
+    action_keys: list[str],
+) -> np.ndarray | None:
+    state_pose = _extract_pose_sequence_from_sample(data, modality="state", keys=state_keys, metadata=metadata)
+    action_pose = _extract_pose_sequence_from_sample(data, modality="action", keys=action_keys, metadata=metadata)
+    if state_pose is None or action_pose is None:
+        return None
+
+    init_pos = state_pose["position"][0]
+    init_rot = state_pose["rotation"][0]
+    init_rot_inv = init_rot.T
+
+    if action_pose["absolute"]:
+        position_abs = action_pose["position"]
+        rotation_abs = action_pose["rotation"]
+    else:
+        position_abs = init_pos[None, :] + np.cumsum(action_pose["position"], axis=0)
+        rotation_abs = np.zeros_like(action_pose["rotation"], dtype=np.float32)
+        running_rot = init_rot.astype(np.float32)
+        for idx, delta_rot in enumerate(action_pose["rotation"]):
+            running_rot = running_rot @ delta_rot
+            rotation_abs[idx] = running_rot
+
+    rel_pos_world = position_abs - init_pos[None, :]
+    rel_pos = (init_rot_inv @ rel_pos_world.T).T.astype(np.float32)
+    rel_rot = np.einsum("ij,tjk->tik", init_rot_inv, rotation_abs).astype(np.float32)
+    rel_rot_6d = pt.matrix_to_rotation_6d(torch.from_numpy(rel_rot)).detach().cpu().numpy().astype(np.float32)
+
+    gripper = action_pose["gripper"]
+    if gripper is None:
+        gripper = np.zeros((rel_pos.shape[0], 1), dtype=np.float32)
+    elif gripper.ndim == 1:
+        gripper = gripper[:, None]
+    elif gripper.ndim == 2 and gripper.shape[-1] != 1:
+        gripper = gripper[..., :1]
+
+    return np.concatenate([rel_pos, rel_rot_6d, gripper.astype(np.float32)], axis=-1)
+
+
+def calculate_relative_pose_action_statistics(
+    parquet_paths: list[Path],
+    metadata: DatasetMetadata,
+    lerobot_modality_meta: "LeRobotModalityMetadata",
+    action_keys_full: list[str],
+    state_keys_full: list[str],
+    action_indices: list[int],
+    state_indices: list[int],
+) -> dict[str, list[float]]:
+    def _get_chunk(array: np.ndarray, step_indices: np.ndarray, padding_strategy: str) -> np.ndarray:
+        max_length = array.shape[0]
+        front_padding = step_indices < 0
+        end_padding = step_indices >= max_length
+        padding_positions = np.logical_or(front_padding, end_padding)
+        output = np.zeros((len(step_indices), array.shape[1]), dtype=array.dtype)
+        if (~padding_positions).any():
+            output[~padding_positions] = array[step_indices[~padding_positions]]
+        if padding_positions.any():
+            if padding_strategy == "first_last":
+                output[front_padding] = array[0]
+                output[end_padding] = array[-1]
+            elif padding_strategy == "zero":
+                output[padding_positions] = 0
+            else:
+                raise ValueError(f"Invalid padding strategy: {padding_strategy}")
+        return output
+
+    key_specs = []
+    for key in state_keys_full + action_keys_full:
+        modality, subkey = key.split(".", 1)
+        field_meta = getattr(lerobot_modality_meta, modality)[subkey]
+        key_specs.append(
+            (
+                key,
+                field_meta.original_key or subkey,
+                (field_meta.start, field_meta.end),
+                "first_last" if field_meta.absolute else "zero",
+                modality,
+            )
+        )
+
+    all_relative_actions = []
+    for parquet_path in tqdm(sorted(list(parquet_paths)), desc="Collecting relative_pose_6d stats"):
+        data = pd.read_parquet(parquet_path)
+        trajectory_length = len(data)
+        cached_columns = {}
+        for _, source_col, _, _, _ in key_specs:
+            if source_col not in cached_columns:
+                if source_col not in data.columns:
+                    raise ValueError(f"{source_col} not found in parquet columns.")
+                cached_columns[source_col] = np.stack(data[source_col])
+
+        for base_index in range(trajectory_length):
+            sample_data = {}
+            for key, source_col, data_slice, padding_strategy, modality in key_specs:
+                indices = np.array(state_indices if modality == "state" else action_indices) + base_index
+                chunk = _get_chunk(cached_columns[source_col][:, data_slice[0] : data_slice[1]], indices, padding_strategy)
+                sample_data[key] = chunk.astype(np.float32)
+
+            relative_action = _build_relative_pose_action_from_sample(
+                sample_data,
+                metadata=metadata,
+                state_keys=state_keys_full,
+                action_keys=action_keys_full,
+            )
+            if relative_action is None:
+                raise ValueError("Failed to build relative_pose_6d statistics from dataset sample.")
+            all_relative_actions.append(relative_action)
+
+    stacked = np.concatenate(all_relative_actions, axis=0).astype(np.float32)
+    return {
+        "mean": np.mean(stacked, axis=0).tolist(),
+        "std": np.std(stacked, axis=0).tolist(),
+        "min": np.min(stacked, axis=0).tolist(),
+        "max": np.max(stacked, axis=0).tolist(),
+        "q01": np.quantile(stacked, 0.01, axis=0).tolist(),
+        "q99": np.quantile(stacked, 0.99, axis=0).tolist(),
+    }
+
+
 class ModalityConfig(BaseModel):
     """Configuration for a modality."""
 
@@ -583,8 +805,15 @@ class LeRobotSingleDataset(Dataset):
         self.data_cfg = data_cfg
         if not Path(dataset_path).exists():
             raise FileNotFoundError(f"Dataset path {dataset_path} does not exist")
-        # indict letobot version
-        self._lerobot_version = self.data_cfg.get("lerobot_version", "v2.0")  # self._indict_lerobot_version(**kwargs)
+        # This loader only supports the LeRobot v3 dataset layout.
+        self._lerobot_version = "v3.0"
+        if self.data_cfg is not None:
+            configured_version = self.data_cfg.get("lerobot_version", "v3.0")
+            if configured_version not in (None, "v3.0"):
+                raise ValueError(
+                    f"Unsupported lerobot_version={configured_version}. "
+                    "starVLA/dataloader/gr00t_lerobot/datasets.py now only supports LeRobot v3.0."
+                )
 
         self._action_mode = None
         self._action_mode_state_map = {}
@@ -854,6 +1083,36 @@ class LeRobotSingleDataset(Dataset):
                     stat = np.array(le_statistics[le_modality][stat_name])
                     dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist()
 
+        if self._use_relative_pose_trajectory():
+            rel_pose_stats_path = self.dataset_path / LE_ROBOT_RELATIVE_POSE_STATS_FILENAME
+            relative_pose_stats = None
+
+            if rel_pose_stats_path.exists():
+                with open(rel_pose_stats_path, "r") as f:
+                    rel_pose_payload = json.load(f)
+                if "action.relative_pose_6d" in rel_pose_payload:
+                    relative_pose_stats = rel_pose_payload["action.relative_pose_6d"]
+                elif "relative_pose_6d" in rel_pose_payload:
+                    relative_pose_stats = rel_pose_payload["relative_pose_6d"]
+                elif "action" in rel_pose_payload:
+                    relative_pose_stats = rel_pose_payload["action"]
+
+            if relative_pose_stats is None:
+                raise FileNotFoundError(
+                    "Relative pose stats are required for `action_chunk_representation=relative_pose_6d`, "
+                    f"but {rel_pose_stats_path} was missing or did not contain `action.relative_pose_6d`, "
+                    "`relative_pose_6d`, or `action`."
+                )
+
+            DatasetStatisticalValues.model_validate(relative_pose_stats)
+            dataset_statistics["action"]["relative_pose_6d"] = relative_pose_stats
+            simplified_modality_meta["action"]["relative_pose_6d"] = {
+                "absolute": False,
+                "rotation_type": None,
+                "shape": [len(relative_pose_stats["mean"])],
+                "continuous": True,
+            }
+
         # 3. Full dataset metadata
         metadata = DatasetMetadata(
             statistics=dataset_statistics,  # type: ignore
@@ -865,58 +1124,36 @@ class LeRobotSingleDataset(Dataset):
 
     def _get_trajectories(self) -> tuple[np.ndarray, np.ndarray]:
         """Get the trajectories in the dataset."""
-        # Get trajectory lengths, IDs, and whitelist from dataset metadata
-        # v2.0
-        if self._lerobot_version == "v2.0":
-            file_path = self.dataset_path / LE_ROBOT_EPISODE_FILENAME
-            with open(file_path, "r") as f:
-                episode_metadata = [json.loads(line) for line in f]
-            trajectory_ids = []
-            trajectory_lengths = []
-            for episode in episode_metadata:
+        file_paths = sorted(list(self.dataset_path.glob(LE_ROBOT3_EPISODE_FILENAME)))
+        trajectory_ids = []
+        trajectory_lengths = []
+        self.trajectory_ids_to_metadata = {}
+        for file_path in file_paths:
+            episodes_data = pd.read_parquet(file_path)
+            timestamp_cols = [
+                c for c in episodes_data.columns if str(c).startswith("videos/") and str(c).endswith("/from_timestamp")
+            ]
+            for index, episode in episodes_data.iterrows():
                 trajectory_ids.append(episode["episode_index"])
                 trajectory_lengths.append(episode["length"])
-            return np.array(trajectory_ids), np.array(trajectory_lengths)
-        # v3.0
-        elif self._lerobot_version == "v3.0":
-            file_paths = sorted(list((self.dataset_path).glob(LE_ROBOT3_EPISODE_FILENAME)))
-            trajectory_ids = []
-            trajectory_lengths = []
-            # data_chunck_index = []
-            # data_file_index = []
-            # vido_from_index = []
-            self.trajectory_ids_to_metadata = {}
-            for file_path in file_paths:
-                episodes_data = pd.read_parquet(file_path)
-                timestamp_cols = [
-                    c
-                    for c in episodes_data.columns
-                    if str(c).startswith("videos/") and str(c).endswith("/from_timestamp")
-                ]
-                for index, episode in episodes_data.iterrows():
-                    trajectory_ids.append(episode["episode_index"])
-                    trajectory_lengths.append(episode["length"])
 
-                    from_timestamps = {}
-                    for col in timestamp_cols:
-                        value = episode[col]
-                        if pd.isna(value):
-                            continue
-                        # videos/{video_key}/from_timestamp -> {video_key}
-                        video_key = str(col)[len("videos/") : -len("/from_timestamp")]
-                        from_timestamps[video_key] = float(value)
+                from_timestamps = {}
+                for col in timestamp_cols:
+                    value = episode[col]
+                    if pd.isna(value):
+                        continue
+                    video_key = str(col)[len("videos/") : -len("/from_timestamp")]
+                    from_timestamps[video_key] = float(value)
 
-                    # TODO auto map key? just map to file_path and file_from_index
-                    episode_meta = {
-                        "data/chunk_index": episode["data/chunk_index"],
-                        "data/file_index": episode["data/file_index"],
-                        "data/file_from_index": index,
-                        "videos/from_timestamps": from_timestamps,
-                    }
-                    self.trajectory_ids_to_metadata[trajectory_ids[-1]] = episode_meta
+                episode_meta = {
+                    "data/chunk_index": episode["data/chunk_index"],
+                    "data/file_index": episode["data/file_index"],
+                    "data/file_from_index": index,
+                    "videos/from_timestamps": from_timestamps,
+                }
+                self.trajectory_ids_to_metadata[trajectory_ids[-1]] = episode_meta
 
-            # Should be able to read the saved index info directly here
-            return np.array(trajectory_ids), np.array(trajectory_lengths)
+        return np.array(trajectory_ids), np.array(trajectory_lengths)
 
     def _get_all_steps(self) -> list[tuple[int, int]]:
         """Get the trajectory IDs and base indices for all steps in the dataset.
@@ -997,10 +1234,7 @@ class LeRobotSingleDataset(Dataset):
             zip(self.trajectory_ids, self.trajectory_lengths), total=len(self.trajectory_ids), desc="Getting All Step"
         ):
             try:
-                if self._lerobot_version == "v2.0":
-                    data = self.get_trajectory_data(trajectory_id)
-                elif self._lerobot_version == "v3.0":
-                    data = self.get_trajectory_data_lerobot_v3(trajectory_id)
+                data = self.get_trajectory_data(trajectory_id)
 
                 trajectory_skipped = False
 
@@ -1162,6 +1396,8 @@ class LeRobotSingleDataset(Dataset):
         action_mode = _normalize_action_mode(action_mode)
         if action_mode not in {"abs", "delta", "rel"}:
             raise ValueError(f"Invalid action_mode: {action_mode}. Expected one of: abs, delta, rel.")
+        if self._use_relative_pose_trajectory() and action_mode != "abs":
+            raise ValueError("`action_chunk_representation=relative_pose_6d` requires `action_mode=abs`.")
         self._action_mode = action_mode
 
         apply_keys = _normalize_action_mode_apply_keys(self.data_cfg.get("action_mode_apply_keys", None))
@@ -1224,6 +1460,22 @@ class LeRobotSingleDataset(Dataset):
 
         return data
 
+    @staticmethod
+    def _to_numpy_array(value) -> np.ndarray:
+        if isinstance(value, np.ndarray):
+            return value
+        if isinstance(value, torch.Tensor):
+            return value.detach().cpu().numpy()
+        return np.asarray(value)
+
+    def _use_relative_pose_trajectory(self) -> bool:
+        if self.data_cfg is None:
+            return False
+        action_repr = self.data_cfg.get("action_chunk_representation", None)
+        if action_repr is not None:
+            return str(action_repr).lower() == "relative_pose_6d"
+        return self.data_cfg.get("relative_trajectory", False) in [True, "True", "true"]
+
     def _get_lerobot_modality_meta(self) -> LeRobotModalityMetadata:
         """Get the metadata for the LeRobot dataset."""
         modality_meta_path = self.dataset_path / LE_ROBOT_MODALITY_FILENAME
@@ -1253,20 +1505,12 @@ class LeRobotSingleDataset(Dataset):
 
     def _get_tasks(self) -> pd.DataFrame:
         """Get the tasks for the dataset."""
-        if self._lerobot_version == "v2.0":
-            tasks_path = self.dataset_path / LE_ROBOT_TASKS_FILENAME
-            with open(tasks_path, "r") as f:
-                tasks = [json.loads(line) for line in f]
-            df = pd.DataFrame(tasks)
-            return df.set_index("task_index")
-
-        elif self._lerobot_version == "v3.0":
-            tasks_path = self.dataset_path / LE_ROBOT3_TASKS_FILENAME
-            df = pd.read_parquet(tasks_path)
-            df = df.reset_index()  # Convert the index into a column (typically named 'index')
-            df = df.rename(columns={"index": "task"})  # Rename the 'index' column to 'task'
-            df = df[["task_index", "task"]]  # Reorder columns
-            return df
+        tasks_path = self.dataset_path / LE_ROBOT3_TASKS_FILENAME
+        df = pd.read_parquet(tasks_path)
+        df = df.reset_index()
+        df = df.rename(columns={"index": "task"})
+        df = df[["task_index", "task"]]
+        return df.set_index("task_index")
 
     def _check_integrity(self):
         """Use the config to check if the keys are valid and detect silent data corruption."""
@@ -1329,10 +1573,16 @@ class LeRobotSingleDataset(Dataset):
             all_images.append(image)
     
         language = data[self.modality_keys["language"][0]][0]
-        action = []
-        for action_key in self.modality_keys["action"]:
-            action.append(data[action_key])
-        action = np.concatenate(action, axis=1).astype(np.float16)
+        if self._use_relative_pose_trajectory():
+            relative_action = data.get("action.relative_pose_6d", None)
+            if relative_action is None:
+                raise KeyError("Expected `action.relative_pose_6d` to be produced by the transform pipeline.")
+            action = self._to_numpy_array(relative_action).astype(np.float16)
+        else:
+            action = []
+            for action_key in self.modality_keys["action"]:
+                action.append(self._to_numpy_array(data[action_key]))
+            action = np.concatenate(action, axis=1).astype(np.float16)
 
         sample = {
             "action": action,
@@ -1389,19 +1639,7 @@ class LeRobotSingleDataset(Dataset):
 
     def get_trajectory_data(self, trajectory_id: int) -> pd.DataFrame:
         """Get the data for a trajectory."""
-        if self._lerobot_version == "v2.0":
-
-            if self.curr_traj_id == trajectory_id and self.curr_traj_data is not None:
-                return self.curr_traj_data
-            else:
-                chunk_index = self.get_episode_chunk(trajectory_id)
-                parquet_path = self.dataset_path / self.data_path_pattern.format(
-                    episode_chunk=chunk_index, episode_index=trajectory_id
-                )
-                assert parquet_path.exists(), f"Parquet file not found at {parquet_path}"
-                return pd.read_parquet(parquet_path)
-        elif self._lerobot_version == "v3.0":
-            return self.get_trajectory_data_lerobot_v3(trajectory_id)
+        return self.get_trajectory_data_lerobot_v3(trajectory_id)
 
     def get_trajectory_data_lerobot_v3(self, trajectory_id: int) -> pd.DataFrame:
         """Get the data for a trajectory from lerobot v3."""
@@ -1500,21 +1738,15 @@ class LeRobotSingleDataset(Dataset):
         return output
 
     def get_video_path(self, trajectory_id: int, key: str) -> Path:
-        chunk_index = self.get_episode_chunk(trajectory_id)
         original_key = self.lerobot_modality_meta.video[key].original_key
         if original_key is None:
             original_key = key
-        if self._lerobot_version == "v2.0":
-            video_filename = self.video_path_pattern.format(
-                episode_chunk=chunk_index, episode_index=trajectory_id, video_key=original_key
-            )
-        elif self._lerobot_version == "v3.0":
-            episode_meta = self.trajectory_ids_to_metadata[trajectory_id]
-            video_filename = self.video_path_pattern.format(
-                video_key=original_key,
-                chunk_index=episode_meta["data/chunk_index"],
-                file_index=episode_meta["data/file_index"],
-            )
+        episode_meta = self.trajectory_ids_to_metadata[trajectory_id]
+        video_filename = self.video_path_pattern.format(
+            video_key=original_key,
+            chunk_index=episode_meta["data/chunk_index"],
+            file_index=episode_meta["data/file_index"],
+        )
         return self.dataset_path / video_filename
 
     def get_video(
@@ -1553,14 +1785,13 @@ class LeRobotSingleDataset(Dataset):
         timestamp: np.ndarray = self.curr_traj_data["timestamp"].to_numpy()
         # Get the corresponding video timestamps from the step indices
         video_timestamp = timestamp[step_indices]
-        if self._lerobot_version == "v3.0":
-            episode_meta = self.trajectory_ids_to_metadata.get(trajectory_id, {})
-            from_timestamps = episode_meta.get("videos/from_timestamps", {})
-            original_video_key = self.lerobot_modality_meta.video[key].original_key
-            if original_video_key is None:
-                original_video_key = key
-            from_timestamp = float(from_timestamps.get(original_video_key, 0.0))
-            video_timestamp = video_timestamp + from_timestamp
+        episode_meta = self.trajectory_ids_to_metadata.get(trajectory_id, {})
+        from_timestamps = episode_meta.get("videos/from_timestamps", {})
+        original_video_key = self.lerobot_modality_meta.video[key].original_key
+        if original_video_key is None:
+            original_video_key = key
+        from_timestamp = float(from_timestamps.get(original_video_key, 0.0))
+        video_timestamp = video_timestamp + from_timestamp
 
         return get_frames_by_timestamps(
             video_path.as_posix(),
@@ -1668,8 +1899,7 @@ class LeRobotSingleDataset(Dataset):
         if original_key is None:
             original_key = key
         for i in range(len(step_indices)):  #
-            # task_indices.append(self.curr_traj_data[original_key][step_indices[i]].item())
-            value = self.curr_traj_data[original_key].iloc[step_indices[i]]  # TODO check v2.0
+            value = self.curr_traj_data[original_key].iloc[step_indices[i]]
             task_indices.append(value if isinstance(value, (int, float)) else value.item())
 
         return self.tasks.loc[task_indices]["task"].tolist()
