@@ -161,6 +161,25 @@ def _invalidate_legacy_stats_cache(stats_path: Path, reason: str) -> None:
     print(f"Detected incompatible dataset statistics cache at {stats_path}: {reason}")
 
 
+def _looks_like_statistics_dict(payload: dict) -> bool:
+    """Best-effort check for the legacy raw statistics layout."""
+    if not payload:
+        return False
+
+    required_stat_keys = {"min", "max", "mean", "std", "q01", "q99"}
+    found_stats = False
+
+    for value in payload.values():
+        if not isinstance(value, dict):
+            continue
+        if required_stat_keys.issubset(value.keys()):
+            found_stats = True
+        else:
+            return False
+
+    return found_stats
+
+
 def _load_stats_cache(
     stats_path: Path,
     expected_config: dict,
@@ -187,6 +206,11 @@ def _load_stats_cache(
     cache_config = payload.get("__cache_config")
     statistics = payload.get("statistics")
     if format_version != LE_ROBOT_STATS_FORMAT_VERSION or cache_config is None or statistics is None:
+        if _looks_like_statistics_dict(payload):
+            # Older caches stored the statistics dictionary directly at the top level.
+            # Keep supporting that layout across action modes and migrate it in place.
+            _save_stats_cache(stats_path, expected_config, payload)
+            return payload
         if invalidate_legacy:
             _invalidate_legacy_stats_cache(stats_path, "legacy statistics format detected")
         return None
@@ -1012,78 +1036,80 @@ class LeRobotSingleDataset(Dataset):
             return (not dist.is_initialized()) or dist.get_rank() == 0
 
         action_mode = _normalize_action_mode(self.data_cfg.get("action_mode", "abs") if self.data_cfg else "abs")
+        use_relative_pose_trajectory = self._use_relative_pose_trajectory()
 
-        stats_path = self.dataset_path / LE_ROBOT_STATS_FILENAME
-        action_cfg = self.modality_configs.get("action")
-        state_cfg = self.modality_configs.get("state")
-        action_keys_full = list(action_cfg.modality_keys) if action_cfg else []
-        state_keys_full = list(state_cfg.modality_keys) if state_cfg else []
-        action_indices = list(action_cfg.delta_indices) if action_cfg else None
-        state_indices = list(state_cfg.delta_indices) if state_cfg else None
+        dataset_statistics = {"state": {}, "action": {}}
 
-        apply_keys = _normalize_action_mode_apply_keys(
-            self.data_cfg.get("action_mode_apply_keys", None) if self.data_cfg else None,
-            action_keys_full,
-        )
-        normalized_state_map = _normalize_action_mode_state_map(
-            self.data_cfg.get("action_mode_state_map", {}) if self.data_cfg else {}
-        )
-        stats_cache_config = _build_stats_cache_config(
-            action_mode=action_mode,
-        )
-        parquet_files = list(self.dataset_path.glob(LE_ROBOT_DATA_FILENAME))
-        parquet_files_filtered = [pf for pf in parquet_files if "episode_033675.parquet" not in pf.name]
+        if not use_relative_pose_trajectory:
+            stats_path = self.dataset_path / LE_ROBOT_STATS_FILENAME
+            action_cfg = self.modality_configs.get("action")
+            state_cfg = self.modality_configs.get("state")
+            action_keys_full = list(action_cfg.modality_keys) if action_cfg else []
+            state_keys_full = list(state_cfg.modality_keys) if state_cfg else []
+            action_indices = list(action_cfg.delta_indices) if action_cfg else None
+            state_indices = list(state_cfg.delta_indices) if state_cfg else None
 
-        if is_main():
-            le_statistics = _load_or_compute_statistics(
-                stats_path,
-                stats_cache_config=stats_cache_config,
-                parquet_paths=parquet_files_filtered,
-                dataset_name=self.dataset_name,
+            apply_keys = _normalize_action_mode_apply_keys(
+                self.data_cfg.get("action_mode_apply_keys", None) if self.data_cfg else None,
+                action_keys_full,
+            )
+            normalized_state_map = _normalize_action_mode_state_map(
+                self.data_cfg.get("action_mode_state_map", {}) if self.data_cfg else {}
+            )
+            stats_cache_config = _build_stats_cache_config(
                 action_mode=action_mode,
-                lerobot_modality_meta=le_modality_meta,
-                action_keys_full=action_keys_full,
-                state_keys_full=state_keys_full,
-                action_indices=action_indices,
-                state_indices=state_indices,
-                action_mode_apply_keys=apply_keys,
-                action_mode_state_map=normalized_state_map,
             )
-        else:
-            le_statistics = None
+            parquet_files = list(self.dataset_path.glob(LE_ROBOT_DATA_FILENAME))
+            parquet_files_filtered = [pf for pf in parquet_files if "episode_033675.parquet" not in pf.name]
 
-        if dist.is_initialized():
-            dist.barrier()
+            if is_main():
+                le_statistics = _load_or_compute_statistics(
+                    stats_path,
+                    stats_cache_config=stats_cache_config,
+                    parquet_paths=parquet_files_filtered,
+                    dataset_name=self.dataset_name,
+                    action_mode=action_mode,
+                    lerobot_modality_meta=le_modality_meta,
+                    action_keys_full=action_keys_full,
+                    state_keys_full=state_keys_full,
+                    action_indices=action_indices,
+                    state_indices=state_indices,
+                    action_mode_apply_keys=apply_keys,
+                    action_mode_state_map=normalized_state_map,
+                )
+            else:
+                le_statistics = None
 
-        if le_statistics is None:
-            le_statistics = _load_stats_cache(
-                stats_path,
-                stats_cache_config,
-                invalidate_legacy=False,
-            )
+            if dist.is_initialized():
+                dist.barrier()
+
             if le_statistics is None:
-                raise RuntimeError(f"Dataset statistics cache is missing or invalid after sync: {stats_path}")
+                le_statistics = _load_stats_cache(
+                    stats_path,
+                    stats_cache_config,
+                    invalidate_legacy=False,
+                )
+                if le_statistics is None:
+                    raise RuntimeError(f"Dataset statistics cache is missing or invalid after sync: {stats_path}")
 
-        for stat in le_statistics.values():
-            DatasetStatisticalValues.model_validate(stat)
+            for stat in le_statistics.values():
+                DatasetStatisticalValues.model_validate(stat)
 
-        dataset_statistics = {}
-        for our_modality in ["state", "action"]:
-            dataset_statistics[our_modality] = {}
-            for subkey in simplified_modality_meta[our_modality]:
-                dataset_statistics[our_modality][subkey] = {}
-                state_action_meta = le_modality_meta.get_key_meta(f"{our_modality}.{subkey}")
-                assert isinstance(state_action_meta, LeRobotStateActionMetadata)
-                le_modality = state_action_meta.original_key
-                for stat_name in le_statistics[le_modality]:
-                    indices = np.arange(
-                        state_action_meta.start,
-                        state_action_meta.end,
-                    )
-                    stat = np.array(le_statistics[le_modality][stat_name])
-                    dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist()
+            for our_modality in ["state", "action"]:
+                for subkey in simplified_modality_meta[our_modality]:
+                    dataset_statistics[our_modality][subkey] = {}
+                    state_action_meta = le_modality_meta.get_key_meta(f"{our_modality}.{subkey}")
+                    assert isinstance(state_action_meta, LeRobotStateActionMetadata)
+                    le_modality = state_action_meta.original_key
+                    for stat_name in le_statistics[le_modality]:
+                        indices = np.arange(
+                            state_action_meta.start,
+                            state_action_meta.end,
+                        )
+                        stat = np.array(le_statistics[le_modality][stat_name])
+                        dataset_statistics[our_modality][subkey][stat_name] = stat[indices].tolist()
 
-        if self._use_relative_pose_trajectory():
+        if use_relative_pose_trajectory:
             rel_pose_stats_path = self.dataset_path / LE_ROBOT_RELATIVE_POSE_STATS_FILENAME
             relative_pose_stats = None
 

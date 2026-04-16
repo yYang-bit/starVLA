@@ -20,8 +20,8 @@ framework:
     hidden_size: 1024     # Matches DiT's final projection, used for ActionDecoder
     add_pos_embed: True
     max_seq_len: 1024
-    action_dim: 10
-    state_dim: 7
+    action_dim: 20
+    state_dim: 20
     future_action_window_size: 15
     action_horizon: 16
     past_action_window_size: 0

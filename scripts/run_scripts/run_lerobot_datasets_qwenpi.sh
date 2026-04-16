@@ -31,7 +31,7 @@ cp $0 ${output_dir}/
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 2 \
+  --num_processes 8 \
   starVLA/training/train_starvla.py \
   --config_yaml ./starVLA/config/training/starvla_cotrain_oxe.yaml \
   --framework.name ${Framework_name} \
@@ -49,7 +49,7 @@ accelerate launch \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project starVLA \
-  --wandb_entity jinhuiye \
+  --wandb_entity zhiboyyy-galbot-aps \
   # --is_debug True
 
 
