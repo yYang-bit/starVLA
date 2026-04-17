@@ -357,15 +357,17 @@ class RelativePoseActionTransform(ModalityTransform):
 
             assert arm_poses
             return {
-                "position": np.concatenate([pose["position"] for pose in arm_poses if pose is not None], axis=-1),
-                "rotation": np.concatenate([pose["rotation"] for pose in arm_poses if pose is not None], axis=1),
-                "gripper": np.concatenate(
+                "position": np.stack([pose["position"] for pose in arm_poses if pose is not None], axis=1),
+                "rotation": np.stack([pose["rotation"] for pose in arm_poses if pose is not None], axis=1),
+                "gripper": np.stack(
                     [
-                        pose["gripper"] if pose["gripper"] is not None else np.zeros((pose["position"].shape[0], 1), dtype=np.float32)
+                        pose["gripper"]
+                        if pose["gripper"] is not None
+                        else np.zeros((pose["position"].shape[0], 1), dtype=np.float32)
                         for pose in arm_poses
                         if pose is not None
                     ],
-                    axis=-1,
+                    axis=1,
                 ),
                 "absolute": all(bool(pose["absolute"]) for pose in arm_poses if pose is not None),
             }
@@ -454,7 +456,7 @@ class RelativePoseActionTransform(ModalityTransform):
 
         init_pos = state_pose["position"][-1]
         init_rot = state_pose["rotation"][-1]
-        init_rot_inv = init_rot.T
+        init_rot_inv = np.swapaxes(init_rot, -1, -2)
 
         if action_pose["absolute"]:
             position_abs = action_pose["position"]
@@ -467,14 +469,14 @@ class RelativePoseActionTransform(ModalityTransform):
                 running_rot = running_rot @ delta_rot
                 rotation_abs[idx] = running_rot
 
-        rel_pos_world = position_abs - init_pos[None, :]
-        rel_pos = (init_rot_inv @ rel_pos_world.T).T.astype(np.float32)
+        rel_pos_world = position_abs - init_pos[None, ...]
         #单臂 or bimanual
         if init_rot.ndim == 2:
+            rel_pos = (init_rot_inv @ rel_pos_world.T).T.astype(np.float32)
             rel_rot = np.einsum("ij,tjk->tik", init_rot_inv, rotation_abs).astype(np.float32)
             rel_rot_6d = pt.matrix_to_rotation_6d(torch.from_numpy(rel_rot)).detach().cpu().numpy().astype(np.float32)
         else:
-            #6D rotation = rotation matrix 的前两列（column-wise）
+            rel_pos = np.einsum("aij,taj->tai", init_rot_inv, rel_pos_world).astype(np.float32)
             rel_rot = np.einsum("aij,tajk->taik", init_rot_inv, rotation_abs).astype(np.float32)
             rel_rot_6d = (
                 pt.matrix_to_rotation_6d(torch.from_numpy(rel_rot.reshape(-1, 3, 3)))
@@ -482,21 +484,40 @@ class RelativePoseActionTransform(ModalityTransform):
                 .cpu()
                 .numpy()
                 .astype(np.float32)
-                .reshape(rel_rot.shape[0], -1)
+                .reshape(rel_rot.shape[0], rel_rot.shape[1], -1)
             )
 
-        components = [rel_pos, rel_rot_6d]
-        if self.include_gripper:
-            gripper = action_pose["gripper"]
+        if init_rot.ndim == 2:
+            components = [rel_pos, rel_rot_6d]
+            if self.include_gripper:
+                gripper = action_pose["gripper"]
+                if gripper is None:
+                    gripper = np.zeros((rel_pos.shape[0], 1), dtype=np.float32)
+                elif gripper.ndim == 1:
+                    gripper = gripper[:, None]
+                elif gripper.ndim > 2:
+                    gripper = gripper.reshape(gripper.shape[0], -1)
+                components.append(gripper.astype(np.float32))
+            output = np.concatenate(components, axis=-1)
+        else:
+            gripper = action_pose["gripper"] if self.include_gripper else None
             if gripper is None:
-                gripper = np.zeros((rel_pos.shape[0], 1), dtype=np.float32)
+                gripper = np.zeros((rel_pos.shape[0], rel_rot.shape[1], 1), dtype=np.float32)
             elif gripper.ndim == 1:
-                gripper = gripper[:, None]
-            elif gripper.ndim == 2 and gripper.shape[-1] != 1:
-                gripper = gripper[..., :1]
-            components.append(gripper.astype(np.float32))
+                gripper = gripper[:, None, None]
+            elif gripper.ndim == 2:
+                gripper = gripper[:, :, None]
 
-        data[self.output_key] = np.concatenate(components, axis=-1)
+            per_arm_components = []
+            num_arms = rel_pos.shape[1]
+            for arm_idx in range(num_arms):
+                per_arm_components.append(rel_pos[:, arm_idx, :])
+                per_arm_components.append(rel_rot_6d[:, arm_idx, :])
+                if self.include_gripper:
+                    per_arm_components.append(gripper[:, arm_idx, :].astype(np.float32))
+            output = np.concatenate(per_arm_components, axis=-1)
+
+        data[self.output_key] = output
         return data
 
 

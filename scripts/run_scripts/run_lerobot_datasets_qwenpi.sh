@@ -19,6 +19,7 @@ oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
 data_mix=my_mix
 run_root_dir=./playground/Checkpoints
 run_id=1011_starvla_qwenpi
+freeze_module_list='qwen_vl_interface'
 export action_input_dim=2048
 ###########################################################################################
 
