@@ -1,12 +1,13 @@
 # export NCCL_SOCKET_IFNAME=bond0
 # export NCCL_IB_HCA=mlx5_2,mlx5_3
-export NCCL_IB_DISABLE=1
-export NCCL_DEBUG=INFO
-export NCCL_DEBUG_SUBSYS=INIT
 
-export NCCL_BLOCKING_WAIT=1
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
+# export NCCL_IB_DISABLE=1
+# export NCCL_DEBUG=INFO
+# export NCCL_DEBUG_SUBSYS=INIT
+
+# export NCCL_BLOCKING_WAIT=1
+# export NCCL_ASYNC_ERROR_HANDLING=1
+# export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
 
 
 # === Please modify the following paths according to your environment ===
@@ -32,7 +33,7 @@ cp $0 ${output_dir}/
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 8 \
+  --num_processes 1 \
   starVLA/training/train_starvla.py \
   --config_yaml ./starVLA/config/training/starvla_cotrain_oxe.yaml \
   --framework.name ${Framework_name} \
@@ -41,12 +42,12 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 1 \
+  --datasets.vla_data.per_device_batch_size 8 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.gradient_accumulation_steps 1 \
+  --trainer.gradient_accumulation_steps 8 \
   --trainer.max_train_steps 100000 \
-  --trainer.save_interval 10000 \
-  --trainer.logging_frequency 10 \
+  --trainer.save_interval 5000 \
+  --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
