@@ -13,7 +13,7 @@ export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
 ###########################################################################################
 
 Framework_name=QwenPI
-base_vlm=/mnt/home/yangzhibo/playground/Pretrained_models/Qwen3-VL-4B-Instruct
+base_vlm=playground/Pretrained_models/Qwen3-VL-2B-Instruct
 DIT_TYPE="DiT-B"
 oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
 data_mix=my_mix
@@ -41,8 +41,9 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 16 \
+  --datasets.vla_data.per_device_batch_size 1 \
   --trainer.freeze_modules ${freeze_module_list} \
+  --trainer.gradient_accumulation_steps 1 \
   --trainer.max_train_steps 100000 \
   --trainer.save_interval 10000 \
   --trainer.logging_frequency 10 \
@@ -73,4 +74,3 @@ accelerate launch \
 #   --run_id ${run_id} \
 #   --wandb_project your_project \
 #   --wandb_entity your_name
-

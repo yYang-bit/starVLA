@@ -117,8 +117,15 @@ class Qwen_PI(baseframework):
         self.config = merge_framework_config(QwenPIDefaultConfig, config)
         self.qwen_vl_interface = get_vlm_model(config=self.config)
 
-        # dynamic get llm config
-        num_vl_layers, llm_hidden_size = 36, self.qwen_vl_interface.model.config.hidden_size
+        # Read layer count from the loaded backbone instead of hard-coding a specific Qwen variant.
+        model_config = self.qwen_vl_interface.model.config
+        text_config = getattr(model_config, "text_config", None)
+        num_vl_layers = getattr(text_config, "num_hidden_layers", None)
+        if num_vl_layers is None:
+            num_vl_layers = getattr(model_config, "num_hidden_layers", None)
+        if num_vl_layers is None:
+            raise ValueError("Unable to infer `num_vl_layers` from the loaded VLM config.")
+        llm_hidden_size = model_config.hidden_size
         self.config.framework.qwenvl.vl_hidden_dim = llm_hidden_size
         self.config.framework.qwenvl.num_vl_layers = num_vl_layers
 
