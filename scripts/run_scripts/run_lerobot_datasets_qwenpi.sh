@@ -33,7 +33,7 @@ cp $0 ${output_dir}/
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
-  --num_processes 1 \
+  --num_processes 8 \
   starVLA/training/train_starvla.py \
   --config_yaml ./starVLA/config/training/starvla_cotrain_oxe.yaml \
   --framework.name ${Framework_name} \
@@ -42,9 +42,9 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 8 \
+  --datasets.vla_data.per_device_batch_size 4 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.gradient_accumulation_steps 8 \
+  --trainer.gradient_accumulation_steps 4 \
   --trainer.max_train_steps 100000 \
   --trainer.save_interval 5000 \
   --trainer.logging_frequency 100 \

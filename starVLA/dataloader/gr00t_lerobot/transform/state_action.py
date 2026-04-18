@@ -263,8 +263,6 @@ class RelativePoseActionTransform(ModalityTransform):
 
     state_keys: list[str] = Field(..., description="State keys required to recover the current end-effector pose.")
     action_keys: list[str] = Field(..., description="Action keys required to recover the action pose trajectory.")
-    output_key: str | None = Field(default=None, description="Key used to store the transformed action.")
-    include_gripper: bool = Field(default=True, description="Whether to append gripper state to the output action.")
     arm_prefixes: list[str] = Field(default_factory=list, description="Optional arm prefixes for multi-arm pose parsing.")
     state_position_suffix: str = Field(default="_abs_pos", description="Per-arm state position suffix.")
     state_rotation_suffix: str = Field(default="_abs_ori_6d", description="Per-arm state rotation suffix.")
@@ -475,13 +473,6 @@ class RelativePoseActionTransform(ModalityTransform):
         if action_pose["absolute"]:
             position_abs = action_pose["position"]
             rotation_abs = action_pose["rotation"]
-        else:
-            position_abs = init_pos[None, :] + np.cumsum(action_pose["position"], axis=0)
-            rotation_abs = np.zeros_like(action_pose["rotation"], dtype=np.float32)
-            running_rot = init_rot.astype(np.float32)
-            for idx, delta_rot in enumerate(action_pose["rotation"]):
-                running_rot = running_rot @ delta_rot
-                rotation_abs[idx] = running_rot
 
         rel_pos_world = position_abs - init_pos[None, ...]
         #单臂 or bimanual
@@ -503,32 +494,26 @@ class RelativePoseActionTransform(ModalityTransform):
          #单臂 or bimanual
         if init_rot.ndim == 2:
             components = [rel_pos, rel_rot_6d]
-            if self.include_gripper:
-                gripper = action_pose["gripper"]
-                if gripper is None:
-                    gripper = np.zeros((rel_pos.shape[0], 1), dtype=np.float32)
-                elif gripper.ndim == 1:
-                    gripper = gripper[:, None]
-                elif gripper.ndim > 2:
-                    gripper = gripper.reshape(gripper.shape[0], -1)
-                components.append(gripper.astype(np.float32))
+            gripper = action_pose["gripper"]
+            if gripper is None:
+                gripper = np.zeros((rel_pos.shape[0], 1), dtype=np.float32)
+            elif gripper.ndim == 1:
+                gripper = gripper[:, None]
+            elif gripper.ndim > 2:
+                gripper = gripper.reshape(gripper.shape[0], -1)
+            components.append(gripper.astype(np.float32))
             output = np.concatenate(components, axis=-1)
         else:
-            gripper = action_pose["gripper"] if self.include_gripper else None
-
+            gripper = action_pose["gripper"] 
             per_arm_components = []
             num_arms = rel_pos.shape[1]
             for arm_idx in range(num_arms):
                 per_arm_components.append(rel_pos[:, arm_idx, :])
                 per_arm_components.append(rel_rot_6d[:, arm_idx, :])
-                if self.include_gripper:
-                    per_arm_components.append(gripper[:, arm_idx, :].astype(np.float32))
+                per_arm_components.append(gripper[:, arm_idx, :].astype(np.float32))
             output = np.concatenate(per_arm_components, axis=-1)
-
-        if self.output_key is None:
             data.update(self._split_output_by_action_keys(output))
-        else:
-            data[self.output_key] = output
+
         return data
 
 

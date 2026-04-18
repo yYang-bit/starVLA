@@ -34,7 +34,7 @@ class MyDataConfig:
 
     observation_indices = [0]
     action_indices = list(range(16))
-    state_indices = list(range(-8, 0))
+    state_indices = [-1]
 
     def modality_config(self):
         return {

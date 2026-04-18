@@ -1116,11 +1116,7 @@ class LeRobotSingleDataset(Dataset):
             if rel_pose_stats_path.exists():
                 with open(rel_pose_stats_path, "r") as f:
                     rel_pose_payload = json.load(f)
-                if "action.relative_pose" in rel_pose_payload:
-                    relative_pose_stats = rel_pose_payload["action.relative_pose"]
-                elif "relative_pose" in rel_pose_payload:
-                    relative_pose_stats = rel_pose_payload["relative_pose"]
-                elif "action" in rel_pose_payload:
+                if "action" in rel_pose_payload:
                     relative_pose_stats = rel_pose_payload["action"]
 
             if relative_pose_stats is None:
