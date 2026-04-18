@@ -1131,6 +1131,20 @@ class LeRobotSingleDataset(Dataset):
                 )
 
             DatasetStatisticalValues.model_validate(relative_pose_stats)
+            relative_pose_stats_np = {k: np.asarray(v) for k, v in relative_pose_stats.items()}
+            relative_pose_dim = len(relative_pose_stats["mean"])
+            for subkey, meta in le_modality_meta.action.items():
+                indices = np.arange(meta.start, meta.end)
+                dataset_statistics["action"][subkey] = {
+                    stat_name: (
+                        relative_pose_stats_np[stat_name][indices].tolist()
+                        if relative_pose_stats_np[stat_name].ndim > 0
+                        and relative_pose_stats_np[stat_name].shape[0] == relative_pose_dim
+                        else relative_pose_stats_np[stat_name].tolist()
+                    )
+                    for stat_name in relative_pose_stats_np
+                }
+
             dataset_statistics["action"]["relative_pose_6d"] = relative_pose_stats
             simplified_modality_meta["action"]["relative_pose_6d"] = {
                 "absolute": False,
@@ -1601,9 +1615,13 @@ class LeRobotSingleDataset(Dataset):
         language = data[self.modality_keys["language"][0]][0]
         if self._use_relative_pose_trajectory():
             relative_action = data.get("action.relative_pose_6d", None)
-            if relative_action is None:
-                raise KeyError("Expected `action.relative_pose_6d` to be produced by the transform pipeline.")
-            action = self._to_numpy_array(relative_action).astype(np.float16)
+            if relative_action is not None:
+                action = self._to_numpy_array(relative_action).astype(np.float16)
+            else:
+                action = []
+                for action_key in self.modality_keys["action"]:
+                    action.append(self._to_numpy_array(data[action_key]))
+                action = np.concatenate(action, axis=1).astype(np.float16)
         else:
             action = []
             for action_key in self.modality_keys["action"]:

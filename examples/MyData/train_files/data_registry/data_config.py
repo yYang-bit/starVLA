@@ -47,37 +47,39 @@ class MyDataConfig:
     def transform(self, data_cfg=None):
         action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
         if action_repr == "relative_pose_6d":
-            return ComposedModalityTransform(
-                transforms=[
-                    RelativePoseActionTransform(
-                        apply_to=self.state_keys + self.action_keys,
-                        state_keys=self.state_keys,
-                        action_keys=self.action_keys,
-                        output_key="action.relative_pose_6d",
-                        arm_prefixes=["left", "right"],
-                    ),
-                    StateActionToTensor(apply_to=["action.relative_pose_6d"]),
-                    StateActionTransform(
-                        apply_to=["action.relative_pose_6d"],
-                        normalization_modes={"action.relative_pose_6d": "min_max"},
-                    ),
-                ]
-            )
-
-        return ComposedModalityTransform(
-            transforms=[
+            return ComposedModalityTransform(transforms=[
+                RelativePoseActionTransform(
+                    apply_to=self.state_keys + self.action_keys,
+                    state_keys=self.state_keys,
+                    action_keys=self.action_keys,
+                    arm_prefixes=["left", "right"],
+                ),
                 StateActionToTensor(apply_to=self.action_keys),
                 StateActionTransform(
                     apply_to=self.action_keys,
                     normalization_modes={
                         "action.left_abs_pos": "min_max",
+                        "action.left_abs_ori_6d": "min_max",
                         "action.left_gripper": "binary",
                         "action.right_abs_pos": "min_max",
+                        "action.right_abs_ori_6d": "min_max",
                         "action.right_gripper": "binary",
                     },
                 ),
-            ]
-        )
+            ])
+
+        return ComposedModalityTransform(transforms=[
+            StateActionToTensor(apply_to=self.action_keys),
+            StateActionTransform(
+                apply_to=self.action_keys,
+                normalization_modes={
+                    "action.left_abs_pos": "min_max",
+                    "action.left_gripper": "binary",
+                    "action.right_abs_pos": "min_max",
+                    "action.right_gripper": "binary",
+                },
+            ),
+        ])
 
 
 ROBOT_TYPE_CONFIG_MAP = {

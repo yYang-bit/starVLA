@@ -263,7 +263,7 @@ class RelativePoseActionTransform(ModalityTransform):
 
     state_keys: list[str] = Field(..., description="State keys required to recover the current end-effector pose.")
     action_keys: list[str] = Field(..., description="Action keys required to recover the action pose trajectory.")
-    output_key: str = Field(default="action.relative_pose_6d", description="Key used to store the transformed action.")
+    output_key: str | None = Field(default=None, description="Key used to store the transformed action.")
     include_gripper: bool = Field(default=True, description="Whether to append gripper state to the output action.")
     arm_prefixes: list[str] = Field(default_factory=list, description="Optional arm prefixes for multi-arm pose parsing.")
     state_position_suffix: str = Field(default="_abs_pos", description="Per-arm state position suffix.")
@@ -284,6 +284,19 @@ class RelativePoseActionTransform(ModalityTransform):
         assert key.startswith(f"{modality}.")
         subkey = key.replace(f"{modality}.", "", 1)
         return getattr(self.dataset_metadata.modalities, modality)[subkey]
+
+    def _split_output_by_action_keys(self, output: np.ndarray) -> dict[str, np.ndarray]:
+        split_output: dict[str, np.ndarray] = {}
+        start = 0
+        for action_key in self.action_keys:
+            meta = self._get_modality_submeta("action", action_key)
+            width = int(np.prod(meta.shape, dtype=np.int64))
+            split_output[action_key] = output[..., start : start + width].astype(np.float32)
+            start += width
+
+        if start != output.shape[-1]:
+            raise ValueError(f"Split output width ({start}) does not match output dim ({output.shape[-1]}).")
+        return split_output
 
     @staticmethod
     def _infer_rotation_type_from_key(key: str, rotation_type: str | None) -> str | None:
@@ -449,6 +462,7 @@ class RelativePoseActionTransform(ModalityTransform):
         return None
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        import pdb; pdb.set_trace()
         state_pose = self._extract_pose_sequence(data, modality="state", keys=self.state_keys)
         action_pose = self._extract_pose_sequence(data, modality="action", keys=self.action_keys)
         if state_pose is None or action_pose is None:
@@ -486,7 +500,7 @@ class RelativePoseActionTransform(ModalityTransform):
                 .astype(np.float32)
                 .reshape(rel_rot.shape[0], rel_rot.shape[1], -1)
             )
-
+         #单臂 or bimanual
         if init_rot.ndim == 2:
             components = [rel_pos, rel_rot_6d]
             if self.include_gripper:
@@ -501,12 +515,6 @@ class RelativePoseActionTransform(ModalityTransform):
             output = np.concatenate(components, axis=-1)
         else:
             gripper = action_pose["gripper"] if self.include_gripper else None
-            if gripper is None:
-                gripper = np.zeros((rel_pos.shape[0], rel_rot.shape[1], 1), dtype=np.float32)
-            elif gripper.ndim == 1:
-                gripper = gripper[:, None, None]
-            elif gripper.ndim == 2:
-                gripper = gripper[:, :, None]
 
             per_arm_components = []
             num_arms = rel_pos.shape[1]
@@ -517,7 +525,10 @@ class RelativePoseActionTransform(ModalityTransform):
                     per_arm_components.append(gripper[:, arm_idx, :].astype(np.float32))
             output = np.concatenate(per_arm_components, axis=-1)
 
-        data[self.output_key] = output
+        if self.output_key is None:
+            data.update(self._split_output_by_action_keys(output))
+        else:
+            data[self.output_key] = output
         return data
 
 
