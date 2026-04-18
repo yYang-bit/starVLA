@@ -46,7 +46,7 @@ class MyDataConfig:
 
     def transform(self, data_cfg=None):
         action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
-        if action_repr == "relative_pose_6d":
+        if action_repr == "relative_pose":
             return ComposedModalityTransform(transforms=[
                 RelativePoseActionTransform(
                     apply_to=self.state_keys + self.action_keys,
@@ -58,12 +58,10 @@ class MyDataConfig:
                 StateActionTransform(
                     apply_to=self.action_keys,
                     normalization_modes={
-                        "action.left_abs_pos": "min_max",
-                        "action.left_abs_ori_6d": "min_max",
-                        "action.left_gripper": "binary",
-                        "action.right_abs_pos": "min_max",
-                        "action.right_abs_ori_6d": "min_max",
-                        "action.right_gripper": "binary",
+                        "action.left_abs_pos": "q99",
+                        "action.left_gripper": "min_max",
+                        "action.right_abs_pos": "q99",
+                        "action.right_gripper": "min_max",
                     },
                 ),
             ])

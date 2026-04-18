@@ -749,7 +749,7 @@ def calculate_relative_pose_action_statistics(
         )
 
     all_relative_actions = []
-    for parquet_path in tqdm(sorted(list(parquet_paths)), desc="Collecting relative_pose_6d stats"):
+    for parquet_path in tqdm(sorted(list(parquet_paths)), desc="Collecting relative_pose stats"):
         data = pd.read_parquet(parquet_path)
         trajectory_length = len(data)
         cached_columns = {}
@@ -773,7 +773,7 @@ def calculate_relative_pose_action_statistics(
                 action_keys=action_keys_full,
             )
             if relative_action is None:
-                raise ValueError("Failed to build relative_pose_6d statistics from dataset sample.")
+                raise ValueError("Failed to build relative_pose statistics from dataset sample.")
             all_relative_actions.append(relative_action)
 
     stacked = np.concatenate(all_relative_actions, axis=0).astype(np.float32)
@@ -1116,18 +1116,18 @@ class LeRobotSingleDataset(Dataset):
             if rel_pose_stats_path.exists():
                 with open(rel_pose_stats_path, "r") as f:
                     rel_pose_payload = json.load(f)
-                if "action.relative_pose_6d" in rel_pose_payload:
-                    relative_pose_stats = rel_pose_payload["action.relative_pose_6d"]
-                elif "relative_pose_6d" in rel_pose_payload:
-                    relative_pose_stats = rel_pose_payload["relative_pose_6d"]
+                if "action.relative_pose" in rel_pose_payload:
+                    relative_pose_stats = rel_pose_payload["action.relative_pose"]
+                elif "relative_pose" in rel_pose_payload:
+                    relative_pose_stats = rel_pose_payload["relative_pose"]
                 elif "action" in rel_pose_payload:
                     relative_pose_stats = rel_pose_payload["action"]
 
             if relative_pose_stats is None:
                 raise FileNotFoundError(
-                    "Relative pose stats are required for `action_chunk_representation=relative_pose_6d`, "
-                    f"but {rel_pose_stats_path} was missing or did not contain `action.relative_pose_6d`, "
-                    "`relative_pose_6d`, or `action`."
+                    "Relative pose stats are required for `action_chunk_representation=relative_pose`, "
+                    f"but {rel_pose_stats_path} was missing or did not contain `action.relative_pose`, "
+                    "`relative_pose`, or `action`."
                 )
 
             DatasetStatisticalValues.model_validate(relative_pose_stats)
@@ -1145,8 +1145,8 @@ class LeRobotSingleDataset(Dataset):
                     for stat_name in relative_pose_stats_np
                 }
 
-            dataset_statistics["action"]["relative_pose_6d"] = relative_pose_stats
-            simplified_modality_meta["action"]["relative_pose_6d"] = {
+            dataset_statistics["action"]["relative_pose"] = relative_pose_stats
+            simplified_modality_meta["action"]["relative_pose"] = {
                 "absolute": False,
                 "rotation_type": None,
                 "shape": [len(relative_pose_stats["mean"])],
@@ -1437,7 +1437,7 @@ class LeRobotSingleDataset(Dataset):
         if action_mode not in {"abs", "delta", "rel"}:
             raise ValueError(f"Invalid action_mode: {action_mode}. Expected one of: abs, delta, rel.")
         if self._use_relative_pose_trajectory() and action_mode != "abs":
-            raise ValueError("`action_chunk_representation=relative_pose_6d` requires `action_mode=abs`.")
+            raise ValueError("`action_chunk_representation=relative_pose` requires `action_mode=abs`.")
         self._action_mode = action_mode
 
         apply_keys = _normalize_action_mode_apply_keys(self.data_cfg.get("action_mode_apply_keys", None))
@@ -1513,7 +1513,7 @@ class LeRobotSingleDataset(Dataset):
             return False
         action_repr = self.data_cfg.get("action_chunk_representation", None)
         if action_repr is not None:
-            return str(action_repr).lower() == "relative_pose_6d"
+            return str(action_repr).lower() == "relative_pose"
         return self.data_cfg.get("relative_trajectory", False) in [True, "True", "true"]
 
     def _get_lerobot_modality_meta(self) -> LeRobotModalityMetadata:
@@ -1614,7 +1614,7 @@ class LeRobotSingleDataset(Dataset):
     
         language = data[self.modality_keys["language"][0]][0]
         if self._use_relative_pose_trajectory():
-            relative_action = data.get("action.relative_pose_6d", None)
+            relative_action = data.get("action.relative_pose", None)
             if relative_action is not None:
                 action = self._to_numpy_array(relative_action).astype(np.float16)
             else:

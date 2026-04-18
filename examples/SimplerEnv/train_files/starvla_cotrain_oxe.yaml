@@ -73,7 +73,7 @@ datasets:
     obs: ["image_0"]
     image_size: [224,224]
     video_backend: torchvision_av
-    action_chunk_representation: relative_pose_6d
+    action_chunk_representation: relative_pose
     
 trainer:
   epochs: 100

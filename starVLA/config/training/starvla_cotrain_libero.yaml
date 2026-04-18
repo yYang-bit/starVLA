@@ -71,7 +71,7 @@ datasets:
     per_device_batch_size: 16
     load_all_data_for_training: true
     obs: ["image_0"]
-    action_chunk_representation: relative_pose_6d
+    action_chunk_representation: relative_pose
 
 
 trainer:

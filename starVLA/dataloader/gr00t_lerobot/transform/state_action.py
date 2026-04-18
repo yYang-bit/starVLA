@@ -462,7 +462,7 @@ class RelativePoseActionTransform(ModalityTransform):
         return None
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
-        import pdb; pdb.set_trace()
+        # import pdb; pdb.set_trace()
         state_pose = self._extract_pose_sequence(data, modality="state", keys=self.state_keys)
         action_pose = self._extract_pose_sequence(data, modality="action", keys=self.action_keys)
         if state_pose is None or action_pose is None:
