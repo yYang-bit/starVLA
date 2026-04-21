@@ -15,19 +15,19 @@ class MyDataConfig:
         "video.right_arm_camera",
     ]
     state_keys = [
-        "state.left_abs_pos",
-        "state.left_abs_ori_6d",
+        "state.left_pos",
+        "state.left_ori_6d",
         "state.left_gripper",
-        "state.right_abs_pos",
-        "state.right_abs_ori_6d",
+        "state.right_pos",
+        "state.right_ori_6d",
         "state.right_gripper",
     ]
     action_keys = [
-        "action.left_abs_pos",
-        "action.left_abs_ori_6d",
+        "action.left_pos",
+        "action.left_ori_6d",
         "action.left_gripper",
-        "action.right_abs_pos",
-        "action.right_abs_ori_6d",
+        "action.right_pos",
+        "action.right_ori_6d",
         "action.right_gripper",
     ]
     language_keys = ["annotation.human.action.task_description"]
@@ -53,14 +53,18 @@ class MyDataConfig:
                     state_keys=self.state_keys,
                     action_keys=self.action_keys,
                     arm_prefixes=["left", "right"],
+                    state_position_suffix="_pos",
+                    state_rotation_suffix="_ori_6d",
+                    action_position_suffix="_pos",
+                    action_rotation_suffix="_ori_6d",
                 ),
                 StateActionToTensor(apply_to=self.action_keys),
                 StateActionTransform(
                     apply_to=self.action_keys,
                     normalization_modes={
-                        "action.left_abs_pos": "q99",
+                        "action.left_pos": "min_max",
                         "action.left_gripper": "min_max",
-                        "action.right_abs_pos": "q99",
+                        "action.right_pos": "min_max",
                         "action.right_gripper": "min_max",
                     },
                 ),
@@ -71,10 +75,10 @@ class MyDataConfig:
             StateActionTransform(
                 apply_to=self.action_keys,
                 normalization_modes={
-                    "action.left_abs_pos": "min_max",
-                    "action.left_gripper": "binary",
-                    "action.right_abs_pos": "min_max",
-                    "action.right_gripper": "binary",
+                    "action.left_pos": "min_max",
+                    "action.left_gripper": "min_max",
+                    "action.right_pos": "min_max",
+                    "action.right_gripper": "min_max",
                 },
             ),
         ])
@@ -90,6 +94,6 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 
 DATASET_NAMED_MIXTURES = {
     "my_mix": [
-        ("20260412", 1.0, "my_robot"),
+        ("20260421", 1.0, "my_robot"),
     ],
 }

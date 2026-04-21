@@ -1,0 +1,83 @@
+{
+    "state": {
+        "left_pos": {
+            "original_key": "observation.state",
+            "start": 0,
+            "end": 3
+        },
+        "left_ori_6d": {
+            "original_key": "observation.state",
+            "start": 3,
+            "end": 9
+        },
+        "left_gripper": {
+            "original_key": "observation.state",
+            "start": 9,
+            "end": 10
+        },
+        "right_pos": {
+            "original_key": "observation.state",
+            "start": 10,
+            "end": 13
+        },
+        "right_ori_6d": {
+            "original_key": "observation.state",
+            "start": 13,
+            "end": 19
+        },
+        "right_gripper": {
+            "original_key": "observation.state",
+            "start": 19,
+            "end": 20
+        }
+    },
+    "action": {
+        "left_pos": {
+            "original_key": "action",
+            "start": 0,
+            "end": 3
+        },
+        "left_ori_6d": {
+            "original_key": "action",
+            "start": 3,
+            "end": 9
+        },
+        "left_gripper": {
+            "original_key": "action",
+            "start": 9,
+            "end": 10
+        },
+        "right_pos": {
+            "original_key": "action",
+            "start": 10,
+            "end": 13
+        },
+        "right_ori_6d": {
+            "original_key": "action",
+            "start": 13,
+            "end": 19
+        },
+        "right_gripper": {
+            "original_key": "action",
+            "start": 19,
+            "end": 20
+        }
+    },
+    "video": {
+        "cam_head_l_img": {
+            "original_key": "cam_head_l_img"
+        },
+        "left_arm_camera": {
+            "original_key": "left_arm_camera"
+        },
+        "right_arm_camera": {
+            "original_key": "right_arm_camera"
+        }
+    },
+    "annotation": {
+        "human.action.task_description": {
+            "original_key": "task_index"
+        },
+        "human.validity": {}
+    }
+}

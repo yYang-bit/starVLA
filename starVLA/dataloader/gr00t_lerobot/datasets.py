@@ -1112,43 +1112,64 @@ class LeRobotSingleDataset(Dataset):
         if use_relative_pose_trajectory:
             rel_pose_stats_path = self.dataset_path / LE_ROBOT_RELATIVE_POSE_STATS_FILENAME
             relative_pose_stats = None
+            rel_pose_payload = None
 
             if rel_pose_stats_path.exists():
                 with open(rel_pose_stats_path, "r") as f:
                     rel_pose_payload = json.load(f)
-                if "action" in rel_pose_payload:
-                    relative_pose_stats = rel_pose_payload["action"]
+                if "action_stats" in rel_pose_payload:
+                    relative_pose_stats = rel_pose_payload["action_stats"]
 
             if relative_pose_stats is None:
                 raise FileNotFoundError(
                     "Relative pose stats are required for `action_chunk_representation=relative_pose`, "
-                    f"but {rel_pose_stats_path} was missing or did not contain `action.relative_pose`, "
-                    "`relative_pose`, or `action`."
+                    f"but {rel_pose_stats_path} was missing or did not contain `action_stats`, "
+                    "`action.relative_pose`, `relative_pose`, or `action`."
                 )
 
-            DatasetStatisticalValues.model_validate(relative_pose_stats)
-            relative_pose_stats_np = {k: np.asarray(v) for k, v in relative_pose_stats.items()}
-            relative_pose_dim = len(relative_pose_stats["mean"])
-            for subkey, meta in le_modality_meta.action.items():
-                indices = np.arange(meta.start, meta.end)
-                dataset_statistics["action"][subkey] = {
-                    stat_name: (
-                        relative_pose_stats_np[stat_name][indices].tolist()
-                        if relative_pose_stats_np[stat_name].ndim > 0
-                        and relative_pose_stats_np[stat_name].shape[0] == relative_pose_dim
-                        else relative_pose_stats_np[stat_name].tolist()
+            if rel_pose_payload is not None and "action_stats" in rel_pose_payload:
+                def build_min_max_statistical_values(stats: dict, shape: int) -> dict:
+                    stat_min = np.asarray(stats["min"], dtype=np.float32).reshape(-1)
+                    stat_max = np.asarray(stats["max"], dtype=np.float32).reshape(-1)
+                    if stat_min.size == 1 and shape > 1:
+                        stat_min = np.repeat(stat_min, shape)
+                    if stat_max.size == 1 and shape > 1:
+                        stat_max = np.repeat(stat_max, shape)
+                    if stat_min.size != shape or stat_max.size != shape:
+                        raise ValueError(
+                            f"Relative action stats shape mismatch: expected {shape}, "
+                            f"got min={stat_min.shape}, max={stat_max.shape}"
+                        )
+                    #q01 and q99 只是为了防止后面报错，没有这俩Validate会报错
+                    stat_mean = (stat_min + stat_max) / 2
+                    stat_std = (stat_max - stat_min) / 2
+                    return {
+                        "min": stat_min.tolist(),
+                        "max": stat_max.tolist(),
+                        "mean": stat_mean.tolist(),
+                        "std": stat_std.tolist(),
+                        "q01": stat_min.tolist(),
+                        "q99": stat_max.tolist(),
+                    }
+
+                def get_relative_stats_key(subkey: str) -> str | None:
+                    if subkey.endswith("_pos"):
+                        return f"{subkey[: -len('_pos')]}_arm"
+                    if subkey.endswith("_gripper"):
+                        return subkey
+                    return None
+
+                grouped_action_stats = rel_pose_payload["action_stats"]
+                for subkey, meta in le_modality_meta.action.items():
+                    stats_key = get_relative_stats_key(subkey)
+                    if stats_key is None:
+                        continue
+                    if stats_key not in grouped_action_stats:
+                        raise KeyError(f"`action_stats.{stats_key}` not found in {rel_pose_stats_path}")
+                    shape = meta.end - meta.start
+                    dataset_statistics["action"][subkey] = build_min_max_statistical_values(
+                        grouped_action_stats[stats_key], shape
                     )
-                    for stat_name in relative_pose_stats_np
-                }
-
-            dataset_statistics["action"]["relative_pose"] = relative_pose_stats
-            simplified_modality_meta["action"]["relative_pose"] = {
-                "absolute": False,
-                "rotation_type": None,
-                "shape": [len(relative_pose_stats["mean"])],
-                "continuous": True,
-            }
-
         # 3. Full dataset metadata
         metadata = DatasetMetadata(
             statistics=dataset_statistics,  # type: ignore
