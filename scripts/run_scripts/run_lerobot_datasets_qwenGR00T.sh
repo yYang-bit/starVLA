@@ -17,14 +17,15 @@ DIT_TYPE="DiT-B"
 oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
 data_mix=my_mix
 run_root_dir=./playground/Checkpoints
-run_id=starvla_qwengroot_0423
+run_id=starvla_qwengroot_0424
+freeze_module_list='qwen_vl_interface'
 # === End of environment variable configuration ===
 ###########################################################################################
 
 output_dir=${run_root_dir}/${run_id}
 mkdir -p ${output_dir}
 cp $0 ${output_dir}/
-export WANDB_MODE=disabled
+# export WANDB_MODE=enable
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \

@@ -347,7 +347,7 @@ class VLAMTrainer(TrainerUtils):
 
             with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
                 vlm_output = self.model.qwen_vl_interface(**batch_vlm)
-                vlm_loss = vlm_output.loss * self.config.trainer.loss_scale.vlm
+                vlm_loss = vlm_output.loss * self.config.trainer.loss_scale.vlm # Returns: CausalLMOutputWithPast | tuple: HF-standard structure (logits, past_key_values, hidden_states, etc.).
             self.accelerator.backward(vlm_loss)
 
             if self.config.trainer.gradient_clipping is not None:

@@ -19,7 +19,7 @@ DIT_TYPE="DiT-B"
 oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
 data_mix=my_mix
 run_root_dir=./playground/Checkpoints
-run_id="galbot_0423"
+run_id="starvla_qwengpi_1"
 freeze_module_list='qwen_vl_interface'
 export action_input_dim=2048
 ###########################################################################################
@@ -44,7 +44,7 @@ accelerate launch \
   --datasets.vla_data.data_mix ${data_mix} \
   --datasets.vla_data.per_device_batch_size 8 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.gradient_accumulation_steps 4 \
+  --trainer.gradient_accumulation_steps 2 \
   --trainer.max_train_steps 20000 \
   --trainer.save_interval 2000 \
   --trainer.logging_frequency 100 \
