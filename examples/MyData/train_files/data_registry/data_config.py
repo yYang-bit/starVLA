@@ -6,11 +6,14 @@ from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
     StateActionToTensor,
     StateActionTransform,
 )
-
+  # video_keys = [
+    #     "video.cam_head_l_img",
+    #     "video.left_arm_camera",
+    #     "video.right_arm_camera",
+    # ]
 
 class MyDataConfig:
     video_keys = [
-        "video.cam_head_l_img",
         "video.left_arm_camera",
         "video.right_arm_camera",
     ]
@@ -94,6 +97,6 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 
 DATASET_NAMED_MIXTURES = {
     "my_mix": [
-        ("20260421", 1.0, "my_robot"),
+        ("try", 1.0, "my_robot"),
     ],
 }

@@ -50,8 +50,11 @@ class VideoStreamer:
             h = min(left_frame.shape[0], right_frame.shape[0])
             left = cv2.resize(left_frame, (int(left_frame.shape[1]*h/left_frame.shape[0]), h))
             right = cv2.resize(right_frame, (int(right_frame.shape[1]*h/right_frame.shape[0]), h))
+            # RGB → BGR（OpenCV要求）
+            left_frame_bgr = cv2.cvtColor(left, cv2.COLOR_RGB2BGR)
+            right_frame_bgr = cv2.cvtColor(right, cv2.COLOR_RGB2BGR)
             # 水平拼接
-            combined = np.hstack([left, right])
+            combined = np.hstack([left_frame_bgr, right_frame_bgr])
             self.latest_frame = combined.copy()
 
     def _generate_frames(self):

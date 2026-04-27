@@ -59,9 +59,9 @@ def unnormalize_actions(normalized_actions: np.ndarray, action_norm_stats: Dict[
         action = 0.5 * (normalized + 1) * (q99 - q01) + q01
         where the gripper dimensions are first binarized: < 0.5 → -1, >= 0.5 → 1
     """
-    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["q01"], dtype=bool))
-    action_high = np.array(action_norm_stats["q99"])
-    action_low = np.array(action_norm_stats["q01"])
+    mask = action_norm_stats.get("mask", np.ones_like(action_norm_stats["min"], dtype=bool))
+    action_high = np.array(action_norm_stats["max"])
+    action_low = np.array(action_norm_stats["min"])
 
     normalized_actions = np.clip(normalized_actions, -1, 1)
 
@@ -176,7 +176,7 @@ def load_action_norm_stats(json_path: str, embodiment_key: str = "new_embodiment
         fill_min_max(9, 10, "left_gripper")
         fill_min_max(10, 13, "right_arm")
         fill_min_max(19, 20, "right_gripper")
-        return {"q01": low, "q99": high, "mask": mask}
+        return {"min": low, "max": high, "mask": mask}
 
     if embodiment_key in stats_data:
         stats_data = stats_data[embodiment_key]
@@ -275,7 +275,9 @@ def inverse_action(action_chunk: np.ndarray, proprio: np.ndarray) -> np.ndarray:
 
 def run_inference(obs_dict: dict, policy, task_instruction: str, action_norm_stats, show_video: VideoStreamer) -> dict:
 
-    images = obs_dict["images"]  # List[np.ndarray], (H, W, 3), uint8
+    images = obs_dict["images"]
+
+    print('1111',images['left_arm_camera'].shape)  # List[np.ndarray], (H, W, 3), uint8
     proprio = obs_dict["proprio"] 
 
     if not isinstance(images, dict) or len(images) < 2:
@@ -322,16 +324,16 @@ def main():
     policy_host = "0.0.0.0"
     policy_port = 8888
     video_port = 7777
-    task_instruction = "Two robotic arms are working together to perform a handover task."
-    action_stats_path = "/mnt/home/yangzhibo/starVLA/examples/MyData/20260421/meta/relative_stats.json"
-    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/1011_starvla_qwenpi/checkpoints/steps_15000_pytorch_model.pt"
+    task_instruction = "Your task is task. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format"
+    action_stats_path = "/mnt/home/yangzhibo/starVLA/examples/MyData/try/meta/relative_stats.json"
+    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/1011_starvla_qwenpi/checkpoints/steps_20000_pytorch_model.pt"
     use_bf16 = False
 
     # ------ ✅ Real code: load normalization statistics (dual-arm 14D) ------
     action_norm_stats = load_action_norm_stats(action_stats_path, embodiment_key="new_embodiment")
-    print(f"Action dim: {len(action_norm_stats['q99'])}")  # should be 14
-    print(f"Action q01: {action_norm_stats['q01']}")
-    print(f"Action q99: {action_norm_stats['q99']}")
+    print(f"Action dim: {len(action_norm_stats['min'])}")  # should be 14
+    print(f"Action min: {action_norm_stats['min']}")
+    print(f"Action max: {action_norm_stats['max']}")
 
     # ------ ✅ Real code: load the Policy locally ------
     policy = build_local_policy(ckpt_path=ckpt_path, use_bf16=use_bf16)

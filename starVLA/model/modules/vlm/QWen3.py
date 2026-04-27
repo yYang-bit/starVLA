@@ -2,14 +2,48 @@
 # Licensed under the MIT License, Version 1.0 (the "License");
 # Implemented by [Jinhui YE / HKUST University] in [2025].
 
+import os
 from typing import Optional
 
+import numpy as np
 import torch
 from starVLA.training.trainer_utils import initialize_overwatch
 from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 from transformers.modeling_outputs import CausalLMOutputWithPast
 
 logger = initialize_overwatch(__name__)
+_PRINTED_IMAGE_DEBUG = False
+
+
+def _debug_print_image_inputs(stage: str, images, batch_inputs=None):
+    global _PRINTED_IMAGE_DEBUG
+    if _PRINTED_IMAGE_DEBUG or os.environ.get("STARVLA_DEBUG_IMAGE_FORMAT", "0") != "1":
+        return
+    _PRINTED_IMAGE_DEBUG = True
+
+    print(f"[STARVLA_DEBUG_IMAGE_FORMAT] {stage}")
+    if images and images[0]:
+        img = images[0][0]
+        print(
+            "[STARVLA_DEBUG_IMAGE_FORMAT] pre_processor "
+            f"type={type(img).__name__}, mode={getattr(img, 'mode', None)}, size={getattr(img, 'size', None)}"
+        )
+        try:
+            arr = np.asarray(img)
+            print(
+                "[STARVLA_DEBUG_IMAGE_FORMAT] pre_processor_numpy "
+                f"shape={arr.shape}, dtype={arr.dtype}, first_pixel={arr[0, 0].tolist()}"
+            )
+        except Exception as exc:
+            print(f"[STARVLA_DEBUG_IMAGE_FORMAT] pre_processor_numpy unavailable: {exc}")
+
+    if batch_inputs is not None:
+        for key, value in batch_inputs.items():
+            if hasattr(value, "shape"):
+                print(
+                    "[STARVLA_DEBUG_IMAGE_FORMAT] processor_output "
+                    f"{key}: shape={tuple(value.shape)}, dtype={getattr(value, 'dtype', None)}"
+                )
 
 IGNORE_INDEX = -100
 IMAGE_TOKEN_INDEX = 151655
@@ -143,6 +177,7 @@ class _QWen3_VL_Interface(nn.Module):
         batch_inputs = self.processor.apply_chat_template(
             messages, tokenize=True, padding=True, add_generation_prompt=True, return_dict=True, return_tensors="pt"
         )
+        _debug_print_image_inputs("Qwen3VL.build_qwenvl_inputs", images, batch_inputs)
 
         # if solutions, mask out the solution tokens in labels
         if solutions is not None:  #  here only for fast_tokenizer now.

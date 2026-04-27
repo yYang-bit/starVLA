@@ -1,23 +1,23 @@
-export NCCL_SOCKET_IFNAME=bond0
-export NCCL_IB_HCA=mlx5_2,mlx5_3
+# export NCCL_SOCKET_IFNAME=bond0
+# export NCCL_IB_HCA=mlx5_2,mlx5_3
 
-# used for check save when communication
-export NCCL_BLOCKING_WAIT=1
-export NCCL_ASYNC_ERROR_HANDLING=1
-export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
+# # used for check save when communication
+# export NCCL_BLOCKING_WAIT=1
+# export NCCL_ASYNC_ERROR_HANDLING=1
+# export NCCL_TIMEOUT=1000  # timeout set to 1 hour (unit: seconds)
 
 
 # === Please modify the following paths according to your environment ===
 ###########################################################################################
 
 Framework_name=QwenGR00T
-base_vlm=StarVLA/Qwen3-VL-4B-Instruct-Action
+base_vlm=playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
 action_input_dim=2560
 DIT_TYPE="DiT-B"
-oxe_data_root=playground/Datasets/OXE_LEROBOT
-data_mix=bridge_rt_1
+oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
+data_mix=my_mix
 run_root_dir=./playground/Checkpoints
-run_id=1004_starvla_qwengroot_oxe
+run_id=starvla_qwengroot_0423
 # === End of environment variable configuration ===
 ###########################################################################################
 
@@ -37,16 +37,16 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 16 \
+  --datasets.vla_data.per_device_batch_size 2 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.max_train_steps 100000 \
-  --trainer.save_interval 20000 \
-  --trainer.logging_frequency 10 \
+  --trainer.max_train_steps 20000 \
+  --trainer.save_interval 2000 \
+  --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project starVLA \
-  --wandb_entity jinhuiye \
+  --wandb_entity zhiboyyy-galbot-aps  \
   # --is_debug True
 
 
