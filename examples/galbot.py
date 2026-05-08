@@ -311,6 +311,7 @@ def run_inference(obs_dict: dict, policy, task_instruction: str, action_norm_sta
         "right_gripper": right_gripper
         
     }
+    print('aaaaa', final_actions)
     return {"actions": final_actions}
 
     
@@ -324,9 +325,9 @@ def main():
     policy_host = "0.0.0.0"
     policy_port = 8888
     video_port = 7777
-    task_instruction = "Your task is task. To identify the key objects for your task. Locate their bounding boxes in [x1,y1,x2,y2] format"
-    action_stats_path = "/mnt/home/yangzhibo/starVLA/examples/MyData/try/meta/relative_stats.json"
-    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/1011_starvla_qwenpi/checkpoints/steps_20000_pytorch_model.pt"
+    task_instruction = "Hold the cup in your hand, and overlap the two cups"
+    action_stats_path = "/mnt/project/public/yangzhibo/umidata/lerobot/20260426_V2/meta/relative_stats.json"
+    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/starvla_qwengroot_0507/checkpoints/steps_20000_pytorch_model.pt"
     use_bf16 = False
 
     # ------ ✅ Real code: load normalization statistics (dual-arm 14D) ------

@@ -36,8 +36,8 @@ class MyDataConfig:
     language_keys = ["annotation.human.action.task_description"]
 
     observation_indices = [0]
-    action_indices = list(range(16))
-    state_indices = [-1]
+    action_indices = list(range(1, 17))
+    state_indices = [0]
 
     def modality_config(self):
         return {
@@ -97,6 +97,6 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 
 DATASET_NAMED_MIXTURES = {
     "my_mix": [
-        ("try", 1.0, "my_robot"),
+        ("20260426_V2", 1.0, "my_robot"),
     ],
 }

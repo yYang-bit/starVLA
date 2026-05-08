@@ -14,10 +14,10 @@ Framework_name=QwenGR00T
 base_vlm=playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
 action_input_dim=2560
 DIT_TYPE="DiT-B"
-oxe_data_root=/mnt/home/yangzhibo/starVLA/examples/MyData
+oxe_data_root=/mnt/project/public/yangzhibo/umidata/lerobot
 data_mix=my_mix
 run_root_dir=./playground/Checkpoints
-run_id=starvla_qwengroot_0424
+run_id=starvla_qwengroot_0508
 freeze_module_list='qwen_vl_interface'
 # === End of environment variable configuration ===
 ###########################################################################################
@@ -38,10 +38,10 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 2 \
+  --datasets.vla_data.per_device_batch_size 4 \
   --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.max_train_steps 20000 \
-  --trainer.save_interval 2000 \
+  --trainer.max_train_steps 40000 \
+  --trainer.save_interval 1000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
