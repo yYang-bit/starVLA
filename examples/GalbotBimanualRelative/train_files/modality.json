@@ -1,0 +1,64 @@
+{
+    "state": {
+        "bimanual_relative_pos": {
+            "start": 0,
+            "end": 3,
+            "original_key": "observation.bimanual_relative",
+            "absolute": false
+        },
+        "bimanual_relative_ori_6d": {
+            "start": 3,
+            "end": 9,
+            "original_key": "observation.bimanual_relative",
+            "rotation_type": "rotation_6d",
+            "absolute": false
+        }
+    },
+    "action": {
+        "left_pos": {
+            "start": 0,
+            "end": 3,
+            "absolute": true
+        },
+        "left_ori_6d": {
+            "start": 3,
+            "end": 9,
+            "rotation_type": "rotation_6d",
+            "absolute": true
+        },
+        "left_gripper": {
+            "start": 9,
+            "end": 10,
+            "absolute": true
+        },
+        "right_pos": {
+            "start": 10,
+            "end": 13,
+            "absolute": true
+        },
+        "right_ori_6d": {
+            "start": 13,
+            "end": 19,
+            "rotation_type": "rotation_6d",
+            "absolute": true
+        },
+        "right_gripper": {
+            "start": 19,
+            "end": 20,
+            "absolute": true
+        }
+    },
+    "video": {
+        "left_wrist": {
+            "original_key": "observation.images.left_wrist"
+        },
+        "right_wrist": {
+            "original_key": "observation.images.right_wrist"
+        }
+    },
+    "annotation": {
+        "human.action.task_description": {
+            "original_key": "task_index"
+        }
+    }
+}
