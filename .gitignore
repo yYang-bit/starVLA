@@ -1,5 +1,6 @@
 debug/
 ckpts/
+Checkpoints/
 third_party/
 # Byte-compiled / optimized / DLL files
 __pycache__/
@@ -235,8 +236,8 @@ tmp
 **/*.npy
 **/*.parquet
 
-*/**/*.md
-*/*.md
+# */**/*.md  # disabled: was accidentally hiding README files in subdirs
+# */*.md
 
 
 logs/*

@@ -1,51 +1,103 @@
 {
     "state": {
-        "bimanual_relative_pos": {
+        "dual_relative_pose_pos": {
             "start": 0,
             "end": 3,
-            "original_key": "observation.bimanual_relative",
-            "absolute": false
+            "original_key": "observation.dual_relative_pose",
+            "absolute": false,
+            "continuous": true
         },
-        "bimanual_relative_ori_6d": {
+        "dual_relative_pose_ori_6d": {
             "start": 3,
             "end": 9,
-            "original_key": "observation.bimanual_relative",
+            "original_key": "observation.dual_relative_pose",
             "rotation_type": "rotation_6d",
-            "absolute": false
+            "absolute": false,
+            "continuous": true
+        },
+        "eef_pos": {
+            "start": 0,
+            "end": 3,
+            "original_key": "observation.state",
+            "absolute": true,
+            "continuous": true
+        },
+        "eef_ori_6d": {
+            "start": 3,
+            "end": 9,
+            "original_key": "observation.state",
+            "rotation_type": "rotation_6d",
+            "absolute": true,
+            "continuous": true
+        },
+        "eef_gripper": {
+            "start": 9,
+            "end": 10,
+            "original_key": "observation.state",
+            "absolute": true,
+            "continuous": false
+        },
+        "eef_right_pos": {
+            "start": 10,
+            "end": 13,
+            "original_key": "observation.state",
+            "absolute": true,
+            "continuous": true
+        },
+        "eef_right_ori_6d": {
+            "start": 13,
+            "end": 19,
+            "original_key": "observation.state",
+            "rotation_type": "rotation_6d",
+            "absolute": true,
+            "continuous": true
+        },
+        "eef_right_gripper": {
+            "start": 19,
+            "end": 20,
+            "original_key": "observation.state",
+            "absolute": true,
+            "continuous": false
         }
     },
     "action": {
         "left_pos": {
             "start": 0,
             "end": 3,
-            "absolute": true
+            "absolute": true,
+            "continuous": true
         },
         "left_ori_6d": {
             "start": 3,
             "end": 9,
             "rotation_type": "rotation_6d",
-            "absolute": true
+            "absolute": true,
+            "continuous": true
         },
         "left_gripper": {
             "start": 9,
             "end": 10,
-            "absolute": true
+            "absolute": true,
+            "continuous": false
         },
         "right_pos": {
             "start": 10,
             "end": 13,
-            "absolute": true
+            "absolute": true,
+            "continuous": true
         },
         "right_ori_6d": {
             "start": 13,
             "end": 19,
             "rotation_type": "rotation_6d",
-            "absolute": true
+            "absolute": true,
+            "continuous": true
         },
         "right_gripper": {
             "start": 19,
             "end": 20,
-            "absolute": true
+            "absolute": true,
+            "continuous": false
         }
     },
     "video": {

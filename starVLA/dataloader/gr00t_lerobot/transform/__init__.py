@@ -19,6 +19,7 @@ from .base import (
     ModalityTransform,
 )
 from .concat import ConcatTransform
+from .self_mode_action import SelfModeActionTransform
 
 # from .state_action import (
 #     StateActionDropout,

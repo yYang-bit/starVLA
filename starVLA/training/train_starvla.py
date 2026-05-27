@@ -157,6 +157,10 @@ class VLATrainer(TrainerUtils):
 
     def _init_wandb(self):
         """Initialize Weights & Biases."""
+        # 检查是否在 trackers 列表中启用了 wandb
+        trackers = getattr(self.config, "trackers", [])
+        if "wandb" not in trackers:
+            return
         if self.accelerator.is_main_process:
             wandb.init(
                 name=self.config.run_id,
