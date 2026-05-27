@@ -11,14 +11,15 @@
 ###########################################################################################
 
 Framework_name=QwenGR00T
-base_vlm=playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
+base_vlm=playground/Pretrained_models/Qwen3.5-0.8B
 action_input_dim=2560
 DIT_TYPE="DiT-B"
 oxe_data_root=/mnt/project/public/yangzhibo/umidata/lerobot
 data_mix=my_mix
 run_root_dir=./playground/Checkpoints
-run_id=starvla_qwengroot_0508
-freeze_module_list='qwen_vl_interface'
+run_id=starvla_qwengroot_0521_full
+freeze_module_list=''
+# freeze_module_list='qwen_vl_interface'
 # === End of environment variable configuration ===
 ###########################################################################################
 

@@ -97,6 +97,6 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 
 DATASET_NAMED_MIXTURES = {
     "my_mix": [
-        ("20260426_V2", 1.0, "my_robot"),
+        ("20260521", 1.0, "my_robot"),
     ],
 }

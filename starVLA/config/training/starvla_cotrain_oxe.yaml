@@ -5,6 +5,7 @@ trackers: [jsonl, wandb]
 wandb_entity: your_wandb_entity
 wandb_project: llavavla
 is_debug: false
+# resume_from_checkpoint: /mnt/home/yangzhibo/starVLA/playground/Checkpoints/starvla_qwengroot_0508/checkpoints/steps_20000_pytorch_model.pt
 
 framework:
   name: QwenPI

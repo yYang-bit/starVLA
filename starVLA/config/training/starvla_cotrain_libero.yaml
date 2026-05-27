@@ -106,7 +106,7 @@ trainer:
 
   # parameters to be determined
   save_format: pt  # pt or safetensors
-  is_resume: false
+  is_resume: true
   resume_epoch: null
   resume_step: null
   enable_gradient_checkpointing: true

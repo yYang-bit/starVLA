@@ -295,7 +295,7 @@ def run_inference(obs_dict: dict, policy, task_instruction: str, action_norm_sta
 
     normalized_action_chunk = parse_response(result)  # [T, 14]
     unorm_action_chunk = unnormalize_actions(normalized_action_chunk, action_norm_stats)
-
+    print('proprio', proprio)
     final_actions = inverse_action(unorm_action_chunk, proprio)  # shape [T, action_dim]
 
     left_arm = final_actions[:, :9]            # [1,9]
@@ -311,7 +311,7 @@ def run_inference(obs_dict: dict, policy, task_instruction: str, action_norm_sta
         "right_gripper": right_gripper
         
     }
-    print('aaaaa', final_actions)
+    print('left_arm', final_actions['left_arm'])
     return {"actions": final_actions}
 
     
@@ -325,9 +325,9 @@ def main():
     policy_host = "0.0.0.0"
     policy_port = 8888
     video_port = 7777
-    task_instruction = "Hold the cup in your hand, and overlap the two cups"
-    action_stats_path = "/mnt/project/public/yangzhibo/umidata/lerobot/20260426_V2/meta/relative_stats.json"
-    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/starvla_qwengroot_0507/checkpoints/steps_20000_pytorch_model.pt"
+    task_instruction = "Hold the cups in your hand, and finally stack the two cups"
+    action_stats_path = "/mnt/project/public/yangzhibo/umidata/lerobot/20260521/meta/relative_stats.json"
+    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/starvla_qwengroot_0521_full/checkpoints/steps_10000_pytorch_model.pt"
     use_bf16 = False
 
     # ------ ✅ Real code: load normalization statistics (dual-arm 14D) ------
