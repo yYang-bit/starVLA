@@ -30,8 +30,6 @@ examples/GalbotBimanualRelative/
     ├── modality.json                  # 字段映射模板
     ├── compute_galbot_stats_self_mode.py             # 离线计算 stats
     ├── convert_v21_to_v30.py          # 数据格式转换（v2.1→v3.0）
-    ├── convert_episodes_jsonl_to_parquet.py
-    ├── convert_tasks_jsonl_to_parquet.py
     └── data_registry/
         └── data_config.py             # 数据策略注册
 ```
