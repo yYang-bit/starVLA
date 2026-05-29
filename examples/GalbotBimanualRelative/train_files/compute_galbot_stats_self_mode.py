@@ -5,7 +5,12 @@
 支持三种 self_mode，模拟训练时的 chunk 采样 + action 变换逻辑，
 保证统计值与训练时实际输入数据严格对齐。
 
-用法：
+Action transform:
+    - pos: 算术差分
+    - rotation_6d: SO(3) 相对旋转 (R[t] @ R[base]^T)
+    - gripper: 二值化（在 abs 值上应用 threshold）
+
+用法:
     python compute_galbot_stats_self_mode.py \
         --dataset_dir /path/to/lerobot_dataset \
         --self_mode delta \
@@ -18,11 +23,22 @@
 
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
+
+# Add rotation utils to path
+_REPO_ROOT = Path(__file__).resolve().parents[3]
+if str(_REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(_REPO_ROOT))
+
+from starVLA.dataloader.gr00t_lerobot.transform.rotation_utils import (
+    compute_relative_rotation_rot6d,
+    identity_rotation_rot6d,
+)
 
 COL_ACTION = "action"
 COL_OBS_STATE = "observation.state"
@@ -31,6 +47,13 @@ COL_DUAL_REL = "observation.dual_relative_pose"
 ACTION_DIM = 20
 STATE_DIM = 9
 GRIPPER_DIMS = [9, 19]
+
+# Rotation_6d column indices (left: 3-9, right: 13-19)
+LEFT_ORI_SLICE = slice(3, 9)
+RIGHT_ORI_SLICE = slice(13, 19)
+# Position column indices
+LEFT_POS_SLICE = slice(0, 3)
+RIGHT_POS_SLICE = slice(10, 13)
 
 
 def load_all_actions(dataset_dir: Path) -> np.ndarray:
@@ -55,6 +78,11 @@ def apply_self_mode_action(
     """
     模拟训练时的 chunk 采样 + action 变换 + gripper 二值化。
 
+    Action transform:
+        - pos: 算术差分
+        - rotation_6d: SO(3) 相对旋转
+        - gripper: 二值化（在 abs 值上）
+
     输出形状: (N_chunks * chunk_size, 20)，即所有 chunk 帧展平后的数据。
     """
     total = abs_action.shape[0]
@@ -68,7 +96,6 @@ def apply_self_mode_action(
             # 尾部 padding：用最后一帧填充
             pad_len = end - total
             chunk = np.pad(chunk, ((0, pad_len), (0, 0)), mode="edge")
-            # 调整 end 使后面的循环正确
             end = total
 
         # gripper 二值化必须在 self_mode 变换之前，作用在 abs 值上
@@ -76,18 +103,44 @@ def apply_self_mode_action(
             chunk[:, idx] = (chunk[:, idx] > gripper_threshold).astype(np.float32)
 
         if self_mode == "chunk_relative":
-            # pos/ori_6d: action[t] -= action[0]；gripper 已二值化，不参与
-            non_gripper = [i for i in range(chunk.shape[1]) if i not in GRIPPER_DIMS]
-            chunk[:, non_gripper] = chunk[:, non_gripper] - chunk[0:1, non_gripper]
+            # pos: action[t] -= action[0]
+            chunk[:, LEFT_POS_SLICE] = chunk[:, LEFT_POS_SLICE] - chunk[0:1, LEFT_POS_SLICE]
+            chunk[:, RIGHT_POS_SLICE] = chunk[:, RIGHT_POS_SLICE] - chunk[0:1, RIGHT_POS_SLICE]
+
+            # rotation_6d: R[t] @ R[0]^T
+            chunk[:, LEFT_ORI_SLICE] = compute_relative_rotation_rot6d(
+                chunk[:, LEFT_ORI_SLICE], chunk[0:1, LEFT_ORI_SLICE]
+            )
+            chunk[:, RIGHT_ORI_SLICE] = compute_relative_rotation_rot6d(
+                chunk[:, RIGHT_ORI_SLICE], chunk[0:1, RIGHT_ORI_SLICE]
+            )
 
         elif self_mode == "delta":
-            # pos/ori_6d: action[t] = action[t] - action[t-1], action[0] = 0；gripper 不做差分
-            non_gripper = [i for i in range(chunk.shape[1]) if i not in GRIPPER_DIMS]
-            tmp = chunk[:, non_gripper].astype(np.float64).copy()
+            # pos: action[t] = action[t] - action[t-1], action[0] = 0
+            pos_tmp = chunk[:, LEFT_POS_SLICE].astype(np.float64).copy()
             for i in range(chunk_size - 1, 0, -1):
-                tmp[i] = tmp[i] - tmp[i - 1]
-            tmp[0] = 0
-            chunk[:, non_gripper] = tmp.astype(np.float32)
+                pos_tmp[i] = pos_tmp[i] - pos_tmp[i - 1]
+            pos_tmp[0] = 0
+            chunk[:, LEFT_POS_SLICE] = pos_tmp.astype(np.float32)
+
+            pos_tmp = chunk[:, RIGHT_POS_SLICE].astype(np.float64).copy()
+            for i in range(chunk_size - 1, 0, -1):
+                pos_tmp[i] = pos_tmp[i] - pos_tmp[i - 1]
+            pos_tmp[0] = 0
+            chunk[:, RIGHT_POS_SLICE] = pos_tmp.astype(np.float32)
+
+            # rotation_6d: R[t] @ R[t-1]^T, R[0] = I
+            ori_tmp = chunk[:, LEFT_ORI_SLICE].copy()
+            for i in range(chunk_size - 1, 0, -1):
+                ori_tmp[i] = compute_relative_rotation_rot6d(ori_tmp[i], ori_tmp[i - 1])
+            ori_tmp[0] = identity_rotation_rot6d()
+            chunk[:, LEFT_ORI_SLICE] = ori_tmp
+
+            ori_tmp = chunk[:, RIGHT_ORI_SLICE].copy()
+            for i in range(chunk_size - 1, 0, -1):
+                ori_tmp[i] = compute_relative_rotation_rot6d(ori_tmp[i], ori_tmp[i - 1])
+            ori_tmp[0] = identity_rotation_rot6d()
+            chunk[:, RIGHT_ORI_SLICE] = ori_tmp
 
         out_chunks.append(chunk)
 

@@ -4,7 +4,10 @@
 """Offline evaluation for starVLA QwenGR00T galbot bimanual self-mode policy.
 
 Comparison is done in **unnormalized delta space** (physical units):
-  - GT  = raw abs action chunk from LeRobot, then differenced (abs[t] - abs[t-1], first=0)
+  - GT  = raw abs action chunk from LeRobot, then transformed to delta:
+          * pos: arithmetic difference (abs[t] - abs[t-1], first=0)
+          * rotation_6d: SO(3) relative rotation (R[t] @ R[t-1]^T, first=I)
+          * gripper: binary threshold on abs values (>100mm → 1)
   - Pred = model normalized_actions → inverse-normalized back to delta physical space
 
 This avoids any ambiguity about the transform pipeline's self_mode setting.
@@ -44,6 +47,10 @@ import torch
 from starVLA.dataloader.lerobot_datasets import make_LeRobotSingleDataset
 from starVLA.dataloader.gr00t_lerobot.registry import DATASET_NAMED_MIXTURES
 from starVLA.model.framework.VLM4A.QwenGR00T import Qwen_GR00T
+from starVLA.dataloader.gr00t_lerobot.transform.rotation_utils import (
+    compute_relative_rotation_rot6d,
+    identity_rotation_rot6d,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -127,10 +134,32 @@ def normalized_to_delta(normed: np.ndarray, stats: dict) -> np.ndarray:
 
 
 def abs_to_delta(abs_chunk: np.ndarray) -> np.ndarray:
-    """Convert [T, 20] abs action chunk → delta.  delta[0]=0; delta[t]=abs[t]-abs[t-1]."""
+    """Convert [T, 20] abs action chunk → delta.
+
+    - pos: arithmetic difference (delta[t] = abs[t] - abs[t-1], delta[0] = 0)
+    - rotation_6d: SO(3) relative rotation (R[t] @ R[t-1]^T, R[0] = I)
+    - gripper: kept as-is (will be binarized separately)
+    """
     delta = np.zeros_like(abs_chunk, dtype=np.float32)
+
     if abs_chunk.shape[0] > 1:
-        delta[1:] = abs_chunk[1:] - abs_chunk[:-1]
+        # pos: arithmetic difference
+        delta[1:, LEFT_POS_SLICE] = abs_chunk[1:, LEFT_POS_SLICE] - abs_chunk[:-1, LEFT_POS_SLICE]
+        delta[1:, RIGHT_POS_SLICE] = abs_chunk[1:, RIGHT_POS_SLICE] - abs_chunk[:-1, RIGHT_POS_SLICE]
+
+        # rotation_6d: SO(3) relative rotation
+        for t in range(1, abs_chunk.shape[0]):
+            delta[t, LEFT_ORI_SLICE] = compute_relative_rotation_rot6d(
+                abs_chunk[t, LEFT_ORI_SLICE], abs_chunk[t - 1, LEFT_ORI_SLICE]
+            )
+            delta[t, RIGHT_ORI_SLICE] = compute_relative_rotation_rot6d(
+                abs_chunk[t, RIGHT_ORI_SLICE], abs_chunk[t - 1, RIGHT_ORI_SLICE]
+            )
+
+    # delta[0]: pos=0, rotation=identity, gripper=0 (will be overwritten by binary)
+    delta[0, LEFT_ORI_SLICE] = identity_rotation_rot6d()
+    delta[0, RIGHT_ORI_SLICE] = identity_rotation_rot6d()
+
     return delta
 
 

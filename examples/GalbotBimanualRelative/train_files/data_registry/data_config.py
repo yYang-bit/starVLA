@@ -7,8 +7,10 @@ Dataset convention (abs-only in parquet, all transforms done at training time):
 
 Action transform (controlled by data_cfg.self_mode):
     "abs"             : action[t] unchanged
-    "delta"           : action[t] -= action[t-1], action[0] = 0
-    "chunk_relative"  : action[t] -= action[0]
+    "delta"           : pos: action[t] -= action[t-1], action[0] = 0
+                        rotation_6d: SO(3) relative rotation R[t] @ R[t-1]^T, R[0] = I
+    "chunk_relative"  : pos: action[t] -= action[0]
+                        rotation_6d: SO(3) relative rotation R[t] @ R[0]^T
 
 Stats are loaded from <dataset>/meta/stats.json (precomputed offline by compute_galbot_stats_self_mode.py).
 
@@ -105,13 +107,21 @@ class GalbotBimanualSelfDataConfig:
             "action.right_ori_6d",
         ]
 
+        # Rotation keys require SO(3) operations (not arithmetic difference)
+        rotation_keys = [
+            "action.left_ori_6d",
+            "action.right_ori_6d",
+        ]
+
         return ComposedModalityTransform(transforms=[
             StateActionToTensor(apply_to=self.action_keys + self.state_keys),
             # --- self-mode action transform (before normalization) ---
             # IMPORTANT: exclude gripper from delta — binary threshold needs abs values
+            # rotation_keys use SO(3) relative rotation, pos keys use arithmetic difference
             SelfModeActionTransform(
                 apply_to=action_keys_no_gripper,
                 self_mode=self_mode,
+                rotation_keys=rotation_keys,
             ),
             # --- normalization ---
             StateActionTransform(

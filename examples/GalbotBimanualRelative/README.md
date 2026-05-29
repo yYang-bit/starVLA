@@ -59,6 +59,17 @@ action 维度说明（每臂 10 dim，共 20 dim）：
 [19]    R_gripper  右夹爪
 ```
 
+**Action transform 说明**：
+
+训练时根据 `self_mode` 对 action 做不同变换：
+- **pos 维度**：算术差分
+  - `delta`: `pos[t] = pos[t] - pos[t-1]`, `pos[0] = 0`
+  - `chunk_relative`: `pos[t] = pos[t] - pos[0]`
+- **rotation_6d 维度**：SO(3) 相对旋转（几何正确）
+  - `delta`: `rot6d[t] = matrix_to_rot6d(R[t] @ R[t-1]^T)`, `rot6d[0]` = identity `[1,0,0,0,1,0]`
+  - `chunk_relative`: `rot6d[t] = matrix_to_rot6d(R[t] @ R[0]^T)`
+- **gripper 维度**：不参与差分，直接在 abs 值上二值化
+
 ---
 
 ## 数据转换
@@ -171,14 +182,19 @@ wandb login
 ```
 parquet abs action
     → StateActionToTensor          # 转 tensor
-    → SelfModeActionTransform      # delta/chunk_relative 变换（gripper 不参与差分）
+    → SelfModeActionTransform      # delta/chunk_relative 变换
+        - pos: 算术差分
+        - rotation_6d: SO(3) 相对旋转 (几何正确)
+        - gripper: 不参与差分
     → StateActionTransform         # 归一化
         - pos: q99 → [-1, 1]
         - ori_6d: 不归一化（本身 [-1,1]）
         - gripper: binary（>100mm → 1）
 ```
 
-实现文件：`starVLA/dataloader/gr00t_lerobot/transform/self_mode_action.py`
+实现文件：
+- `starVLA/dataloader/gr00t_lerobot/transform/self_mode_action.py` — 主 transform
+- `starVLA/dataloader/gr00t_lerobot/transform/rotation_utils.py` — SO(3) 旋转工具
 
 ---
 
