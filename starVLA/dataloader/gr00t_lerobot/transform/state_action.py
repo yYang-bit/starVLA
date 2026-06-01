@@ -258,6 +258,70 @@ class StateActionToTensor(InvertibleModalityTransform):
         return data
 
 
+class RpyToRotation6DTransform(ModalityTransform):
+    """Derive 6D rotation keys from roll/pitch/yaw source keys."""
+
+    apply_to: list[str] = Field(default_factory=list, description="Source keys used by the transform.")
+    groups: dict[str, list[str]] = Field(
+        ...,
+        description="Mapping from output key to [roll_key, pitch_key, yaw_key].",
+    )
+    convention: str = Field(default="XYZ", description="Euler convention for roll/pitch/yaw.")
+    drop_source_keys: bool = Field(default=True, description="Remove source RPY keys after creating output keys.")
+    use_matrix_columns: bool = Field(default=True, description="Use the first two matrix columns for 6D rotation.")
+
+    def model_dump(self, *args, **kwargs):
+        if kwargs.get("mode", "python") == "json":
+            include = {"apply_to", "groups", "convention", "drop_source_keys", "use_matrix_columns"}
+        else:
+            include = kwargs.pop("include", None)
+        return super().model_dump(*args, include=include, **kwargs)
+
+    @staticmethod
+    def _as_tensor(value: Any) -> tuple[torch.Tensor, bool, np.dtype | None]:
+        if isinstance(value, torch.Tensor):
+            return value, True, None
+        array = np.asarray(value)
+        return torch.from_numpy(array), False, array.dtype
+
+    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        for output_key, source_keys in self.groups.items():
+            if len(source_keys) != 3:
+                raise ValueError(f"{output_key} requires exactly three source keys: roll, pitch, yaw.")
+            if not all(source_key in data for source_key in source_keys):
+                missing = [source_key for source_key in source_keys if source_key not in data]
+                raise KeyError(f"Missing RPY source keys for {output_key}: {missing}")
+
+            tensors = []
+            source_is_tensor = False
+            for source_key in source_keys:
+                tensor, is_tensor, _ = self._as_tensor(data[source_key])
+                source_is_tensor = source_is_tensor or is_tensor
+                if tensor.ndim == 1:
+                    tensor = tensor[..., None]
+                if tensor.shape[-1] != 1:
+                    raise ValueError(f"Expected scalar RPY key {source_key}, got shape {tuple(tensor.shape)}")
+                tensors.append(tensor.to(torch.float32))
+
+            rpy = torch.cat(tensors, dim=-1)
+            rotation_matrix = pt.euler_angles_to_matrix(rpy, convention=self.convention)
+            if self.use_matrix_columns:
+                rotation_6d = rotation_matrix[..., :, :2].transpose(-1, -2).reshape(*rotation_matrix.shape[:-2], 6)
+            else:
+                rotation_6d = pt.matrix_to_rotation_6d(rotation_matrix)
+            if source_is_tensor:
+                data[output_key] = rotation_6d
+            else:
+                output = rotation_6d.detach().cpu().numpy()
+                data[output_key] = output.astype(np.float32, copy=False)
+
+            if self.drop_source_keys:
+                for source_key in source_keys:
+                    data.pop(source_key, None)
+
+        return data
+
+
 class RelativePoseActionTransform(ModalityTransform):
     """Build a relative-pose action chunk from raw state/action pose sequences."""
 

@@ -80,7 +80,7 @@ def make_LeRobotSingleDataset(
     :param data_root_dir: The root directory of the dataset.
     :param data_name: The name of the dataset.
     :param robot_type: The robot type config to use.
-    :param lerobot_version: Kept for API compatibility. The underlying loader only supports LeRobot v3.0.
+    :param lerobot_version: Optional LeRobot layout override. Defaults to auto-detecting from meta/info.json.
     :return: A LeRobotSingleDataset object.
     """
 
