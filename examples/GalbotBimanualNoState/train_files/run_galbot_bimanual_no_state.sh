@@ -10,10 +10,10 @@
 # === Please modify the following paths according to your environment ===
 data_root=/mnt/project/human_action_data/liuyi/umi_lerobot_data
 data_name=galbot_lerobot_dual_cup_0529_359piece   #lerobot v3数据集路径
-data_mix=galbot_bimanual_self_mix
-config_yaml=examples/GalbotBimanualRelative/train_files/starvla_qwengroot_galbot_relative_self.yaml
+data_mix=galbot_bimanual_self_no_state_mix
+config_yaml=examples/GalbotBimanualNoState/train_files/starvla_qwengroot_galbot_no_state.yaml
 run_root_dir=/mnt/home/liuyi/project/starVLA/Checkpoints/galbot_delta_action
-run_id=galbot_bimanual_self_$(date +%m%d)
+run_id=galbot_bimanual_no_state_$(date +%m%d)
 
 # === Self-mode config (change self_mode to switch experiment) ===
 self_mode=delta           # abs | delta | chunk_relative
@@ -46,8 +46,9 @@ accelerate launch \
   --datasets.vla_data.data_root_dir ${data_root} \
   --datasets.vla_data.data_name ${data_name} \
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 16 \
+  --datasets.vla_data.per_device_batch_size 6 \
   --datasets.vla_data.self_mode ${self_mode} \
+  --datasets.vla_data.include_state false \
   --datasets.vla_data.gripper_normalization binary \
   --trainer.max_train_steps 80000 \
   --trainer.save_interval 10000 \
@@ -72,6 +73,7 @@ accelerate launch \
 #   --datasets.vla_data.data_root_dir ${data_root} \
 #   --datasets.vla_data.data_mix ${data_mix} \
 #   --datasets.vla_data.self_mode ${self_mode} \
+#   --datasets.vla_data.include_state false \
 #   --run_root_dir ${run_root_dir} \
 #   --run_id ${run_id} \
 #   --wandb_project starVLA_galbot \

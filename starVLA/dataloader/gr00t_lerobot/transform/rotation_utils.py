@@ -74,7 +74,9 @@ def compute_relative_rotation_rot6d(
     """
     R_t = rot6d_to_matrix(rot6d_t)
     R_base = rot6d_to_matrix(rot6d_base)
-    R_relative = R_t @ R_base.transpose(..., 1, 0)  # R_t @ R_base^T
+    # Transpose last two axes: (..., 3, 3) → (..., 3, 3)
+    axes = list(range(R_base.ndim - 2)) + [R_base.ndim - 1, R_base.ndim - 2]
+    R_relative = R_t @ R_base.transpose(axes)  # R_t @ R_base^T
     return matrix_to_rot6d(R_relative)
 
 

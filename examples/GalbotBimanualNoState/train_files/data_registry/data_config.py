@@ -1,9 +1,12 @@
-"""Galbot bimanual (self-mode) — data config, embodiment tags, and mixtures.
+"""Galbot bimanual (self-mode, NO STATE) — data config for contrast experiment.
 
-Dataset convention (abs-only in parquet, all transforms done at training time):
+This is a variant of the original config with state input REMOVED.
+Only vision (dual wrist cameras) is used as input.
+
+Dataset convention (same as original):
     action                         : [T, 20]  next-step abs eef pose + gripper
-    observation.state              : [T, 20]  current-step abs eef pose + gripper
-    observation.dual_relative_pose : [T, 9]   left arm in right arm's base frame (rel_xyz + rel_rot6d)
+    observation.state              : [T, 20]  NOT USED (not loaded)
+    observation.dual_relative_pose : [T, 9]   NOT USED (not loaded)
 
 Action transform (controlled by data_cfg.self_mode):
     "abs"             : action[t] unchanged
@@ -12,17 +15,12 @@ Action transform (controlled by data_cfg.self_mode):
     "chunk_relative"  : pos: action[t] -= action[0]
                         rotation_6d: SO(3) relative rotation R[t] @ R[0]^T
 
-Stats are loaded from <dataset>/meta/stats.json (precomputed offline by compute_galbot_stats_self_mode.py).
+Stats are loaded from <dataset>/meta/stats.json (same as original).
 
-Normalization policy:
+Normalization policy (same as original):
     action.{left,right}_pos                  : q99 → [-1, 1]
     action.{left,right}_ori_6d               : skip (rot6d is intrinsically in [-1, 1])
     action.{left,right}_gripper              : binary (threshold=100mm) → {0, 1}
-    state.dual_relative_pose_pos             : q99 → [-1, 1]
-    state.dual_relative_pose_ori_6d          : skip
-
-Gripper binary threshold (100mm) controlled by data_cfg.gripper_binary_threshold.
-Inference post-processing: model output 0 → 46mm, 1 → 124mm (handled outside training).
 """
 
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
@@ -37,8 +35,8 @@ from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
 )
 
 
-class GalbotBimanualSelfDataConfig:
-    """Self-mode data config — action transform and stats both computed offline.
+class GalbotBimanualSelfNoStateDataConfig:
+    """Self-mode data config WITHOUT state input — vision-only baseline.
 
     Flow: StateActionToTensor → SelfModeActionTransform → StateActionTransform (normalize)
     """
@@ -48,10 +46,7 @@ class GalbotBimanualSelfDataConfig:
         "video.right_wrist",
     ]
 
-    state_keys = [
-        "state.dual_relative_pose_pos",
-        "state.dual_relative_pose_ori_6d",
-    ]
+    state_keys = []  # EMPTY - no state input for this contrast experiment
 
     action_keys = [
         "action.left_pos",
@@ -65,7 +60,7 @@ class GalbotBimanualSelfDataConfig:
     language_keys = ["annotation.human.action.task_description"]
 
     observation_indices = [0]
-    state_indices = [0]
+    state_indices = [0]  # Not used since state_keys is empty
     action_indices = list(range(30))
 
     def modality_config(self):
@@ -95,9 +90,7 @@ class GalbotBimanualSelfDataConfig:
             "action.left_gripper":  gripper_norm,
             "action.right_gripper": gripper_norm,
         }
-        state_norm_modes = {
-            "state.dual_relative_pose_pos": "q99",
-        }
+        # No state normalization needed (state_keys is empty)
 
         # Gripper should NOT be differenced — binary threshold applies to abs values
         action_keys_no_gripper = [
@@ -114,7 +107,7 @@ class GalbotBimanualSelfDataConfig:
         ]
 
         return ComposedModalityTransform(transforms=[
-            StateActionToTensor(apply_to=self.action_keys + self.state_keys),
+            StateActionToTensor(apply_to=self.action_keys),  # No state_keys
             # --- self-mode action transform (before normalization) ---
             # IMPORTANT: exclude gripper from delta — binary threshold needs abs values
             # rotation_keys use SO(3) relative rotation, pos keys use arithmetic difference
@@ -129,26 +122,23 @@ class GalbotBimanualSelfDataConfig:
                 normalization_modes=action_norm_modes,
                 binary_threshold=gripper_binary_threshold,
             ),
-            StateActionTransform(
-                apply_to=self.state_keys,
-                normalization_modes=state_norm_modes,
-            ),
+            # No state normalization transform needed
         ])
 
 
 # ─── Registry ───────────────────────────────────────────────────────────────
 
 ROBOT_TYPE_CONFIG_MAP = {
-    "galbot_bimanual_self": GalbotBimanualSelfDataConfig(),
+    "galbot_bimanual_self_no_state": GalbotBimanualSelfNoStateDataConfig(),
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
-    "galbot_bimanual_self": EmbodimentTag.NEW_EMBODIMENT,
+    "galbot_bimanual_self_no_state": EmbodimentTag.NEW_EMBODIMENT,
 }
 
 DATASET_NAMED_MIXTURES = {
-    "galbot_bimanual_self_mix": [
+    "galbot_bimanual_self_no_state_mix": [
         # data_name is overridden at runtime via --datasets.vla_data.data_name in .sh
-        ("galbot_lerobot_dual_cup", 1.0, "galbot_bimanual_self"),
+        ("galbot_lerobot_dual_cup", 1.0, "galbot_bimanual_self_no_state"),
     ],
 }

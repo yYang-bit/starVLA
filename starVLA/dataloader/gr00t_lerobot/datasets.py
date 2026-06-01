@@ -1041,7 +1041,13 @@ class LeRobotSingleDataset(Dataset):
         dataset_statistics = {"state": {}, "action": {}}
 
         if not use_relative_pose_trajectory:
-            stats_path = self.dataset_path / LE_ROBOT_STATS_FILENAME
+            # Allow overriding stats path from data_cfg (e.g. --datasets.vla_data.stats_path)
+            stats_path_override = self.data_cfg.get("stats_path", None) if self.data_cfg else None
+            if stats_path_override:
+                from pathlib import Path as _Path
+                stats_path = _Path(stats_path_override)
+            else:
+                stats_path = self.dataset_path / LE_ROBOT_STATS_FILENAME
             action_cfg = self.modality_configs.get("action")
             state_cfg = self.modality_configs.get("state")
             action_keys_full = list(action_cfg.modality_keys) if action_cfg else []

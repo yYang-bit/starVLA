@@ -128,8 +128,14 @@ def get_vla_dataset(
     data_mix = data_cfg.data_mix
     delete_pause_frame = data_cfg.get("delete_pause_frame", False)
     mixture_spec = DATASET_NAMED_MIXTURES[data_mix]
+
+    # Allow overriding dataset name from CLI/config (so .sh script controls which dataset to use)
+    data_name_override = data_cfg.get("data_name", None)
+
     included_datasets, filtered_mixture_spec = set(), []
     for d_name, d_weight, robot_type in mixture_spec:
+        if data_name_override:
+            d_name = data_name_override
         dataset_key = (d_name, robot_type)
         if dataset_key in included_datasets:
             print(f"Skipping Duplicate Dataset: `{(d_name, d_weight, robot_type)}`")
