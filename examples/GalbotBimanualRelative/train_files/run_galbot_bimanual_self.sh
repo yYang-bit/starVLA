@@ -19,7 +19,7 @@ run_id=galbot_bimanual_self_$(date +%m%d)
 self_mode=delta           # abs | delta | chunk_relative
 
 # === Stats path (default: <data_root>/<data_name>/meta/stats.json) ===
-# stats_path=${data_root}/${data_name}/meta/stats_delta_chunk30.json
+stats_path=${data_root}/${data_name}/meta/stats.json  #指定lerobot数据集stats路径，默认是meta/stats.json
 
 # === End of environment variable configuration ===
 ###########################################################################################

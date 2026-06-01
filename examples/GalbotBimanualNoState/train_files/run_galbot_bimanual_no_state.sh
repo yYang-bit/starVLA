@@ -46,7 +46,7 @@ accelerate launch \
   --datasets.vla_data.data_root_dir ${data_root} \
   --datasets.vla_data.data_name ${data_name} \
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 6 \
+  --datasets.vla_data.per_device_batch_size 8 \
   --datasets.vla_data.self_mode ${self_mode} \
   --datasets.vla_data.include_state false \
   --datasets.vla_data.gripper_normalization binary \
