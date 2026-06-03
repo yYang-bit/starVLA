@@ -168,7 +168,7 @@ class FastUMIDualArmDataConfig:
     language_keys = ["annotation.human.action.task_description"]
 
     observation_indices = [0]
-    action_indices = list(range(0, 16))
+    action_indices = list(range(0, 32, 2))
     state_indices = [0]
 
     derived_keys = {
@@ -218,10 +218,11 @@ class FastUMIDualArmDataConfig:
         "action.right_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 13, "end": 14},
     }
 
+
     normalization_modes = {
-        "action.left_arm": "min_max",
+        "action.left_arm": "q99",
         "action.left_gripper": "min_max",
-        "action.right_arm": "min_max",
+        "action.right_arm": "q99",
         "action.right_gripper": "min_max",
     }
 
@@ -319,5 +320,5 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 
 DATASET_NAMED_MIXTURES = {
     # "fastumi_dual_arm": [(task, 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
-    "my_mix": [("Add_Rice_to_Rice_Cooker", 1.0, "fastumi_dual_arm")],
+    "my_mix": [("Arrange_Toothbrush_and_Toothpaste", 1.0, "fastumi_dual_arm")],
 }

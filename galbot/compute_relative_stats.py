@@ -227,23 +227,46 @@ def _relative_transform_from_config(data_config) -> RelativePoseActionTransform:
     return transform
 
 
-def _normalization_keys(data_config) -> list[str]:
+def _normalization_modes(data_config) -> dict[str, str]:
     modes = getattr(data_config, "normalization_modes", None)
     if not isinstance(modes, dict):
         raise ValueError("data_config must define normalization_modes as a dict")
-    keys = []
+    normalized_modes = {}
     for key, mode in modes.items():
         if not key.startswith("action."):
             raise ValueError(f"This script writes only action_stats; remove non-action normalization key `{key}`")
-        if str(mode) != "min_max":
-            raise ValueError(f"Only min_max normalization is supported for relative_stats, got {key}: {mode}")
+        normalized_mode = str(mode)
+        if normalized_mode not in {"min_max", "q99"}:
+            raise ValueError(
+                f"Only min_max and q99 normalization are supported for relative_stats, got {key}: {mode}"
+            )
         lowered = key.lower()
         if "ori_6d" in lowered or "rotation_6d" in lowered:
             raise ValueError(f"Rotation key `{key}` must not be normalized")
-        keys.append(key)
-    if not keys:
+        normalized_modes[key] = normalized_mode
+    if not normalized_modes:
         raise ValueError("No action keys found in normalization_modes")
-    return keys
+    return normalized_modes
+
+
+def _validate_normalization_modes(
+    normalization_modes: dict[str, str],
+    arm_keys: dict[str, dict[str, str]],
+) -> None:
+    position_keys = {spec["action_pos"] for spec in arm_keys.values()}
+    gripper_keys = {spec["action_gripper"] for spec in arm_keys.values()}
+
+    for key, mode in normalization_modes.items():
+        if key in position_keys:
+            continue
+        if key in gripper_keys:
+            if mode != "min_max":
+                raise ValueError(f"Gripper key `{key}` must use min_max normalization, got {mode}")
+            continue
+        raise KeyError(
+            f"Normalization key `{key}` is neither an action position key nor an action gripper key "
+            f"from RelativePoseActionTransform"
+        )
 
 
 def _required_arm_keys(data_config, rel_transform: RelativePoseActionTransform) -> dict[str, dict[str, str]]:
@@ -276,13 +299,13 @@ def _expected_dims(
     data_config,
     info_meta: dict[str, Any],
     arm_keys: dict[str, dict[str, str]],
-    normalization_keys: list[str],
+    normalization_modes: dict[str, str],
 ) -> dict[str, int]:
     position_keys = {spec["action_pos"] for spec in arm_keys.values()}
     gripper_keys = {spec["action_gripper"] for spec in arm_keys.values()}
     derived_keys = data_config.modality_config()["action"].derived_keys
     expected = {}
-    for key in normalization_keys:
+    for key in normalization_modes:
         if key in position_keys:
             expected[key] = 3
             continue
@@ -301,14 +324,14 @@ def _expected_dims(
             else:
                 expected[key] = int(source_meta.end - source_meta.start)
             continue
-        raise KeyError(
-            f"Normalization key `{key}` is neither an action position key nor an action gripper key "
-            f"from RelativePoseActionTransform"
-        )
     return expected
 
 
-def _validate_existing_stats(stats_path: Path, expected_dims: dict[str, int]) -> None:
+def _validate_existing_stats(
+    stats_path: Path,
+    expected_dims: dict[str, int],
+    normalization_modes: dict[str, str],
+) -> None:
     if not stats_path.exists():
         raise FileNotFoundError(f"relative stats file not found: {stats_path}")
     payload = _read_json(stats_path)
@@ -325,7 +348,11 @@ def _validate_existing_stats(stats_path: Path, expected_dims: dict[str, int]) ->
     for full_key, dim in expected_dims.items():
         subkey = full_key.split(".", 1)[1]
         stats = action_stats[subkey]
-        for stat_name in ("min", "max"):
+        required_stat_names = ["min", "max"]
+        if normalization_modes[full_key] == "q99":
+            required_stat_names.extend(["q01", "q99"])
+
+        for stat_name in required_stat_names:
             if stat_name not in stats:
                 raise KeyError(f"`action_stats.{subkey}.{stat_name}` missing in {stats_path}")
             values = np.asarray(stats[stat_name], dtype=np.float32).reshape(-1)
@@ -353,18 +380,30 @@ def _rotation_6d_to_matrix(name: str, value: Any) -> np.ndarray:
     return matrix.detach().cpu().numpy().astype(np.float32, copy=False)
 
 
-def _update_min_max(accumulator: dict[str, dict[str, np.ndarray]], key: str, values: np.ndarray) -> None:
+def _update_stats(
+    accumulator: dict[str, dict[str, Any]],
+    key: str,
+    values: np.ndarray,
+    collect_quantiles: bool = False,
+) -> None:
     values = _ensure_2d(key, values)
     current_min = values.min(axis=0)
     current_max = values.max(axis=0)
     if key not in accumulator:
         accumulator[key] = {"min": current_min, "max": current_max}
-        return
-    accumulator[key]["min"] = np.minimum(accumulator[key]["min"], current_min)
-    accumulator[key]["max"] = np.maximum(accumulator[key]["max"], current_max)
+    else:
+        accumulator[key]["min"] = np.minimum(accumulator[key]["min"], current_min)
+        accumulator[key]["max"] = np.maximum(accumulator[key]["max"], current_max)
+
+    if collect_quantiles:
+        accumulator[key].setdefault("values", []).append(values.astype(np.float32, copy=True))
 
 
-def _build_payload(accumulator: dict[str, dict[str, np.ndarray]], expected_dims: dict[str, int]) -> dict[str, Any]:
+def _build_payload(
+    accumulator: dict[str, dict[str, Any]],
+    expected_dims: dict[str, int],
+    normalization_modes: dict[str, str],
+) -> dict[str, Any]:
     missing = [key for key in expected_dims if key not in accumulator]
     if missing:
         raise KeyError(f"No stats were collected for keys: {missing}")
@@ -374,10 +413,19 @@ def _build_payload(accumulator: dict[str, dict[str, np.ndarray]], expected_dims:
         stats = accumulator[full_key]
         if stats["min"].size != expected_dims[full_key] or stats["max"].size != expected_dims[full_key]:
             raise ValueError(f"Stats shape mismatch for `{full_key}`")
-        action_stats[subkey] = {
+        key_payload = {
             "min": stats["min"].astype(float).tolist(),
             "max": stats["max"].astype(float).tolist(),
         }
+        if normalization_modes[full_key] == "q99":
+            if "values" not in stats:
+                raise KeyError(f"No quantile values were collected for `{full_key}`")
+            values = np.concatenate(stats["values"], axis=0)
+            q01 = np.quantile(values, 0.01, axis=0)
+            q99 = np.quantile(values, 0.99, axis=0)
+            key_payload["q01"] = q01.astype(float).tolist()
+            key_payload["q99"] = q99.astype(float).tolist()
+        action_stats[subkey] = key_payload
     return {"action_stats": action_stats}
 
 
@@ -447,12 +495,13 @@ def _compute_dataset_stats(
 
     rel_transform = _relative_transform_from_config(data_config)
     arm_keys = _required_arm_keys(data_config, rel_transform)
-    normalization_keys = _normalization_keys(data_config)
-    expected_dims = _expected_dims(data_config, info, arm_keys, normalization_keys)
-    normalization_key_set = set(normalization_keys)
+    normalization_modes = _normalization_modes(data_config)
+    _validate_normalization_modes(normalization_modes, arm_keys)
+    expected_dims = _expected_dims(data_config, info, arm_keys, normalization_modes)
+    normalization_key_set = set(normalization_modes)
 
     pose_transforms = data_config.pose_transforms()
-    accumulator: dict[str, dict[str, np.ndarray]] = {}
+    accumulator: dict[str, dict[str, Any]] = {}
     selected_base_indices = _select_base_indices(episodes, sample_num, sample_seed)
     if sample_num is not None:
         total_steps = sum(int(episode["length"]) for episode in episodes)
@@ -492,12 +541,17 @@ def _compute_dataset_stats(
                     base_rot = state_rot[-1]
                     rel_pos_world = action_pos - base_pos[None, :]
                     rel_pos = rel_pos_world @ base_rot
-                    _update_min_max(accumulator, spec["action_pos"], rel_pos)
+                    _update_stats(
+                        accumulator,
+                        spec["action_pos"],
+                        rel_pos,
+                        collect_quantiles=normalization_modes[spec["action_pos"]] == "q99",
+                    )
 
                 if spec["action_gripper"] in normalization_key_set:
-                    _update_min_max(accumulator, spec["action_gripper"], sample[spec["action_gripper"]])
+                    _update_stats(accumulator, spec["action_gripper"], sample[spec["action_gripper"]])
 
-    return _build_payload(accumulator, expected_dims)
+    return _build_payload(accumulator, expected_dims, normalization_modes)
 
 
 def _process_dataset(
@@ -516,11 +570,12 @@ def _process_dataset(
     info = _read_json(info_path)
     rel_transform = _relative_transform_from_config(data_config)
     arm_keys = _required_arm_keys(data_config, rel_transform)
-    normalization_keys = _normalization_keys(data_config)
-    expected_dims = _expected_dims(data_config, info, arm_keys, normalization_keys)
+    normalization_modes = _normalization_modes(data_config)
+    _validate_normalization_modes(normalization_modes, arm_keys)
+    expected_dims = _expected_dims(data_config, info, arm_keys, normalization_modes)
 
     if not regenerate:
-        _validate_existing_stats(stats_path, expected_dims)
+        _validate_existing_stats(stats_path, expected_dims, normalization_modes)
         print(f"[OK] Read existing relative stats: {stats_path}")
         return
 

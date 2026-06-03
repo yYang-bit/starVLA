@@ -1373,18 +1373,34 @@ class LeRobotSingleDataset(Dataset):
                 "action": collect_normalization_keys("action"),
             }
 
-            def build_min_max_statistical_values(stats: dict, shape: int) -> dict:
-                stat_min = np.asarray(stats["min"], dtype=np.float32).reshape(-1)
-                stat_max = np.asarray(stats["max"], dtype=np.float32).reshape(-1)
-                if stat_min.size == 1 and shape > 1:
-                    stat_min = np.repeat(stat_min, shape)
-                if stat_max.size == 1 and shape > 1:
-                    stat_max = np.repeat(stat_max, shape)
-                if stat_min.size != shape or stat_max.size != shape:
+            def relative_stat_array(
+                stats: dict,
+                stat_name: str,
+                shape: int,
+                fallback: np.ndarray | None = None,
+            ) -> np.ndarray:
+                if stat_name in stats:
+                    value = stats[stat_name]
+                elif fallback is not None:
+                    value = fallback
+                else:
+                    raise KeyError(f"`{stat_name}` missing from relative stats")
+
+                stat = np.asarray(value, dtype=np.float32).reshape(-1)
+                if stat.size == 1 and shape > 1:
+                    stat = np.repeat(stat, shape)
+                if stat.size != shape:
                     raise ValueError(
                         f"Relative stats shape mismatch: expected {shape}, "
-                        f"got min={stat_min.shape}, max={stat_max.shape}"
+                        f"got {stat_name}={stat.shape}"
                     )
+                return stat
+
+            def build_relative_statistical_values(stats: dict, shape: int) -> dict:
+                stat_min = relative_stat_array(stats, "min", shape)
+                stat_max = relative_stat_array(stats, "max", shape)
+                stat_q01 = relative_stat_array(stats, "q01", shape, fallback=stat_min)
+                stat_q99 = relative_stat_array(stats, "q99", shape, fallback=stat_max)
                 stat_mean = (stat_min + stat_max) / 2
                 stat_std = (stat_max - stat_min) / 2
                 return {
@@ -1392,8 +1408,8 @@ class LeRobotSingleDataset(Dataset):
                     "max": stat_max.tolist(),
                     "mean": stat_mean.tolist(),
                     "std": stat_std.tolist(),
-                    "q01": stat_min.tolist(),
-                    "q99": stat_max.tolist(),
+                    "q01": stat_q01.tolist(),
+                    "q99": stat_q99.tolist(),
                 }
 
             def add_relative_stats(modality: str, payload_key: str, *, required: bool) -> None:
@@ -1433,7 +1449,7 @@ class LeRobotSingleDataset(Dataset):
                         shape = 3
                     else:
                         shape = int(np.prod(simplified_modality_meta[modality][subkey]["shape"], dtype=np.int64))
-                    dataset_statistics[modality][subkey] = build_min_max_statistical_values(grouped_stats[subkey], shape)
+                    dataset_statistics[modality][subkey] = build_relative_statistical_values(grouped_stats[subkey], shape)
 
             add_relative_stats("state", "proprio_stats", required=False)
             add_relative_stats("action", "action_stats", required=True)

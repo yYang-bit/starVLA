@@ -161,7 +161,7 @@ class MyDataConfig:
     language_keys = ["annotation.human.action.task_description"]
 
     observation_indices = [0]
-    action_indices = list(range(0, 16))
+    action_indices = list(range(0, 48, 3))
     state_indices = [0]
 
     derived_keys = {
@@ -231,10 +231,12 @@ class MyDataConfig:
         },
     }
 
+    action_position_normalization_mode = "min_max"
+
     normalization_modes = {
-        "action.left_arm": "min_max",
+        "action.left_arm": action_position_normalization_mode,
         "action.left_gripper": "min_max",
-        "action.right_arm": "min_max",
+        "action.right_arm": action_position_normalization_mode,
         "action.right_gripper": "min_max",
     }
 
