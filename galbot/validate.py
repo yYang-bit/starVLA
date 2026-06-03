@@ -446,7 +446,7 @@ if __name__ == "__main__":
     main()
 
 # 如果想看前 10 个训练集 observation：
-# python validate.py \
+# python galbot/validate.py \
 #   --pretrained_checkpoint playground/Checkpoints/starvla_qwengroot_0521_full/checkpoints/steps_10000_pytorch_model.pt \
 #   --data_root_dir /mnt/project/public/yangzhibo/umidata/lerobot \
 #   --data_mix my_mix \

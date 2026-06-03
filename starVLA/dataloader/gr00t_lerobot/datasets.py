@@ -161,6 +161,57 @@ def _load_lerobot_modality_metadata(
     return LeRobotModalityMetadata.model_validate(payload)
 
 
+def _strip_modality_prefix(key: str, prefix: str) -> str:
+    return key.removeprefix(f"{prefix}.")
+
+
+def _build_direct_lerobot_modality_metadata(
+    modality_configs: dict,
+    info_meta: dict,
+) -> LeRobotModalityMetadata:
+    """Build metadata directly from configured raw keys when meta/modality.json is absent."""
+
+    features = info_meta.get("features", {})
+    payload: dict[str, dict] = {"state": {}, "action": {}, "video": {}, "annotation": {}}
+
+    for modality in ("state", "action"):
+        config = modality_configs.get(modality)
+        if config is None:
+            continue
+
+        for raw_key in config.modality_keys:
+            if raw_key in {"lapa_action", "dream_actions"} or raw_key not in features:
+                continue
+
+            feature = features[raw_key]
+            subkey = _strip_modality_prefix(raw_key, modality)
+            payload[modality][subkey] = {
+                "original_key": raw_key,
+                "start": 0,
+                "end": _infer_feature_width(feature, raw_key),
+                "dtype": feature.get("dtype", "float32"),
+            }
+
+    video_cfg = modality_configs.get("video")
+    if video_cfg is not None:
+        for key in video_cfg.modality_keys:
+            original_key = _strip_modality_prefix(key, "video")
+            payload["video"][original_key] = {"original_key": original_key}
+
+    language_cfg = modality_configs.get("language")
+    if language_cfg is not None:
+        for key in language_cfg.modality_keys:
+            subkey = _strip_modality_prefix(key, "annotation")
+            original_key = None
+            for candidate in (key, subkey, "task_index", "task", "language_instruction", "task_description"):
+                if candidate in features:
+                    original_key = candidate
+                    break
+            payload["annotation"][subkey] = {"original_key": original_key or "task_index"}
+
+    return LeRobotModalityMetadata.model_validate(payload)
+
+
 def _get_state_action_meta(
     lerobot_modality_meta: LeRobotModalityMetadata,
     modality: str,
@@ -170,16 +221,11 @@ def _get_state_action_meta(
     if subkey in modality_meta:
         return modality_meta[subkey]
 
-    if modality == "action" and subkey in lerobot_modality_meta.state:
-        return lerobot_modality_meta.state[subkey]
-
     available = list(modality_meta.keys())
-    if modality == "action":
-        available = available + [f"{key} (from state)" for key in lerobot_modality_meta.state.keys()]
     raise ValueError(f"{modality} key {subkey} not found in metadata, available keys: {available}")
 
 
-def _get_key_meta_with_action_fallback(
+def _get_key_meta_strict(
     lerobot_modality_meta: LeRobotModalityMetadata,
     key: str,
 ) -> LeRobotModalityField:
@@ -187,6 +233,25 @@ def _get_key_meta_with_action_fallback(
     if modality in {"state", "action"}:
         return _get_state_action_meta(lerobot_modality_meta, modality, subkey)
     return lerobot_modality_meta.get_key_meta(key)
+
+
+def _get_state_action_meta_from_info(info_meta: dict, key: str) -> LeRobotStateActionMetadata:
+    features = info_meta.get("features", {})
+    if key not in features:
+        raise KeyError(
+            f"`{key}` not found in meta/info.json features. "
+            f"Available features: {list(features.keys())}"
+        )
+
+    feature = features[key]
+    return LeRobotStateActionMetadata(
+        original_key=key,
+        start=0,
+        end=_infer_feature_width(feature, key),
+        dtype=feature.get("dtype", "float32"),
+        absolute=True,
+        rotation_type=None,
+    )
 
 
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
@@ -912,7 +977,7 @@ class ModalityConfig(BaseModel):
     output_keys: list[str] | None = None
     """The keys to pack after transforms. Defaults to modality_keys for backward compatibility."""
     derived_keys: dict[str, dict] = Field(default_factory=dict)
-    """Derived output keys and their source keys, e.g. RPY -> rotation_6d."""
+    """Derived output keys and their source specs, using keep_from_origin or transform_from_origin."""
 
 
 class LeRobotSingleDataset(Dataset):
@@ -1140,41 +1205,27 @@ class LeRobotSingleDataset(Dataset):
 
         # 1. Modality metadata
         modality_meta_path = self.dataset_path / LE_ROBOT_MODALITY_FILENAME
-        assert modality_meta_path.exists(), f"Please provide a {LE_ROBOT_MODALITY_FILENAME} file in {self.dataset_path}"
         le_info_path = self.dataset_path / LE_ROBOT_INFO_FILENAME
         assert le_info_path.exists(), f"Please provide a {LE_ROBOT_INFO_FILENAME} file in {self.dataset_path}"
+        with open(le_info_path, "r") as f:
+            le_info = json.load(f)
         # 1.1. State and action modalities
         simplified_modality_meta: dict[str, dict] = {}
-        le_modality_meta = _load_lerobot_modality_metadata(modality_meta_path, le_info_path)
+        if modality_meta_path.exists():
+            le_modality_meta = _load_lerobot_modality_metadata(modality_meta_path, le_info_path)
+        else:
+            le_modality_meta = _build_direct_lerobot_modality_metadata(self.modality_configs, le_info)
         for modality in ["state", "action"]:
             simplified_modality_meta[modality] = {}
-            le_state_action_meta: dict[str, LeRobotStateActionMetadata] = getattr(le_modality_meta, modality)
-            for subkey in le_state_action_meta:
-                state_action_dtype = np.dtype(le_state_action_meta[subkey].dtype)
-                if np.issubdtype(state_action_dtype, np.floating):
-                    continuous = True
-                else:
-                    continuous = False
-                simplified_modality_meta[modality][subkey] = {
-                    "absolute": le_state_action_meta[subkey].absolute,
-                    "rotation_type": le_state_action_meta[subkey].rotation_type,
-                    "shape": [le_state_action_meta[subkey].end - le_state_action_meta[subkey].start],
-                    "continuous": continuous,
-                }
-
-        for modality in ["state", "action"]:
             config = self.modality_configs.get(modality)
             if config is None:
                 continue
             for key in config.modality_keys:
-                if not key.startswith(f"{modality}."):
+                if key in simplified_modality_meta[modality]:
                     continue
-                subkey = key.split(".", 1)[1]
-                if subkey in simplified_modality_meta[modality]:
-                    continue
-                state_action_meta = _get_state_action_meta(le_modality_meta, modality, subkey)
+                state_action_meta = _get_state_action_meta_from_info(le_info, key)
                 state_action_dtype = np.dtype(state_action_meta.dtype)
-                simplified_modality_meta[modality][subkey] = {
+                simplified_modality_meta[modality][key] = {
                     "absolute": state_action_meta.absolute,
                     "rotation_type": state_action_meta.rotation_type,
                     "shape": [state_action_meta.end - state_action_meta.start],
@@ -1182,8 +1233,6 @@ class LeRobotSingleDataset(Dataset):
                 }
 
         # 1.2. Video modalities
-        with open(le_info_path, "r") as f:
-            le_info = json.load(f)
         simplified_modality_meta["video"] = {}
 
         def get_video_meta(original_key: str) -> tuple[int, int, int, float]:
@@ -1284,9 +1333,9 @@ class LeRobotSingleDataset(Dataset):
             for our_modality in ["state", "action"]:
                 for subkey in simplified_modality_meta[our_modality]:
                     dataset_statistics[our_modality][subkey] = {}
-                    state_action_meta = _get_state_action_meta(le_modality_meta, our_modality, subkey)
+                    state_action_meta = _get_state_action_meta_from_info(le_info, subkey)
                     assert isinstance(state_action_meta, LeRobotStateActionMetadata)
-                    le_modality = state_action_meta.original_key or subkey
+                    le_modality = state_action_meta.original_key
                     for stat_name in le_statistics[le_modality]:
                         indices = np.arange(
                             state_action_meta.start,
@@ -1305,6 +1354,24 @@ class LeRobotSingleDataset(Dataset):
 
             with open(rel_pose_stats_path, "r") as f:
                 rel_pose_payload = json.load(f)
+
+            def collect_normalization_keys(modality: str) -> set[str]:
+                keys: set[str] = set()
+
+                def visit(transform) -> None:
+                    modes = getattr(transform, "normalization_modes", None)
+                    if isinstance(modes, dict):
+                        keys.update(key for key in modes if str(key).startswith(f"{modality}."))
+                    for child in getattr(transform, "transforms", []):
+                        visit(child)
+
+                visit(self.transforms)
+                return keys
+
+            relative_normalization_keys = {
+                "state": collect_normalization_keys("state"),
+                "action": collect_normalization_keys("action"),
+            }
 
             def build_min_max_statistical_values(stats: dict, shape: int) -> dict:
                 stat_min = np.asarray(stats["min"], dtype=np.float32).reshape(-1)
@@ -1329,16 +1396,29 @@ class LeRobotSingleDataset(Dataset):
                     "q99": stat_max.tolist(),
                 }
 
-            def add_relative_stats(modality: str, payload_key: str) -> None:
-                if payload_key not in rel_pose_payload:
-                    raise KeyError(f"`{payload_key}` not found in {rel_pose_stats_path}")
-                grouped_stats = rel_pose_payload[payload_key]
+            def add_relative_stats(modality: str, payload_key: str, *, required: bool) -> None:
                 config = self.modality_configs.get(modality)
                 if config is None:
                     return
 
                 output_keys = config.output_keys or config.modality_keys
-                for output_key in output_keys:
+                target_output_keys = [
+                    output_key for output_key in output_keys if output_key in relative_normalization_keys[modality]
+                ]
+                keys_requiring_payload = [
+                    output_key
+                    for output_key in target_output_keys
+                    if not output_key.split(".", 1)[1].endswith(("_ori_6d", "_rotation_6d"))
+                ]
+                if payload_key not in rel_pose_payload:
+                    if not required or not keys_requiring_payload:
+                        grouped_stats = {}
+                    else:
+                        raise KeyError(f"`{payload_key}` not found in {rel_pose_stats_path}")
+                else:
+                    grouped_stats = rel_pose_payload[payload_key]
+
+                for output_key in target_output_keys:
                     _, subkey = output_key.split(".", 1)
                     if subkey.endswith("_ori_6d") or subkey.endswith("_rotation_6d"):
                         dataset_statistics[modality][subkey] = _fixed_rotation_6d_stats()
@@ -1355,12 +1435,13 @@ class LeRobotSingleDataset(Dataset):
                         shape = int(np.prod(simplified_modality_meta[modality][subkey]["shape"], dtype=np.int64))
                     dataset_statistics[modality][subkey] = build_min_max_statistical_values(grouped_stats[subkey], shape)
 
-            add_relative_stats("state", "proprio_stats")
-            add_relative_stats("action", "action_stats")
+            add_relative_stats("state", "proprio_stats", required=False)
+            add_relative_stats("action", "action_stats", required=True)
         self._add_derived_metadata_and_statistics(
             simplified_modality_meta=simplified_modality_meta,
             dataset_statistics=dataset_statistics,
             le_modality_meta=le_modality_meta,
+            require_source_statistics=not use_relative_pose_trajectory,
         )
         # 3. Full dataset metadata
         metadata = DatasetMetadata(
@@ -1376,6 +1457,7 @@ class LeRobotSingleDataset(Dataset):
         simplified_modality_meta: dict[str, dict],
         dataset_statistics: dict[str, dict],
         le_modality_meta: LeRobotModalityMetadata,
+        require_source_statistics: bool = True,
     ) -> None:
         def source_stat_slice(modality: str, source_subkey: str, start: int, end: int) -> dict:
             if source_subkey not in dataset_statistics[modality]:
@@ -1385,6 +1467,35 @@ class LeRobotSingleDataset(Dataset):
                 stat = np.asarray(stat_value, dtype=np.float32)
                 sliced_stats[stat_name] = stat[start:end].tolist()
             return sliced_stats
+
+        def source_slice_bounds(spec: dict, source_meta: LeRobotStateActionMetadata) -> tuple[int, int]:
+            source_width = source_meta.end - source_meta.start
+            if "range" in spec:
+                value_range = spec["range"]
+                if len(value_range) != 2:
+                    raise ValueError(f"Derived key range must be [start, end], got {value_range}")
+                start, end = int(value_range[0]), int(value_range[1])
+            else:
+                start = int(spec.get("start", 0))
+                end = int(spec.get("end", source_width))
+
+            if start < 0 or end <= start or end > source_width:
+                raise ValueError(
+                    f"Derived key has invalid source slice [{start}:{end}] for source width {source_width}."
+                )
+            return start, end
+
+        def rotation_6d_source_width(rotation_from: str) -> int | None:
+            normalized = rotation_from.lower()
+            if normalized in {"rpy", "euler_rpy", "euler_angles_rpy"}:
+                return 3
+            if normalized in {"quat", "quaternion"}:
+                return 4
+            if normalized in {"rotation_6d", "rot6d"}:
+                return 6
+            if normalized in {"matrix", "rotation_matrix"}:
+                return 9
+            return None
 
         for modality in ("state", "action"):
             config = self.modality_configs.get(modality)
@@ -1396,12 +1507,62 @@ class LeRobotSingleDataset(Dataset):
                 if output_modality != modality:
                     raise ValueError(f"Derived key {output_key} is configured under {modality}.")
 
+                if spec_type in {"keep_from_origin", "keep_from_orign"}:
+                    source_key = str(spec.get("source_key", ""))
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
+                    start, end = source_slice_bounds(spec, source_meta)
+                    shape = end - start
+                    simplified_modality_meta[modality][output_subkey] = {
+                        "absolute": source_meta.absolute,
+                        "rotation_type": source_meta.rotation_type,
+                        "shape": [shape],
+                        "continuous": bool(np.issubdtype(np.dtype(source_meta.dtype), np.floating)),
+                    }
+                    if output_subkey not in dataset_statistics[modality]:
+                        if source_key in dataset_statistics[modality]:
+                            dataset_statistics[modality][output_subkey] = source_stat_slice(
+                                modality, source_key, start, end
+                            )
+                        elif require_source_statistics:
+                            raise ValueError(f"Missing statistics for derived source {source_key}")
+                    continue
+
+                if spec_type in {"transform_from_origin", "transform_from_orign"}:
+                    source_key = str(spec.get("source_key", ""))
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
+                    start, end = source_slice_bounds(spec, source_meta)
+                    rotation_from = str(spec.get("from", "")).lower()
+                    rotation_to = str(spec.get("to", "")).lower()
+                    if not rotation_from or not rotation_to:
+                        raise ValueError(f"Derived key {output_key} must specify both `from` and `to`.")
+                    if rotation_to != "rotation_6d":
+                        raise ValueError(f"Derived key {output_key} only supports to=rotation_6d, got {rotation_to}.")
+                    expected_width = rotation_6d_source_width(rotation_from)
+                    if expected_width is not None and end - start != expected_width:
+                        raise ValueError(
+                            f"Derived key {output_key} source slice [{start}:{end}] does not match "
+                            f"from={rotation_from} width {expected_width}."
+                        )
+
+                    simplified_modality_meta[modality][output_subkey] = {
+                        "absolute": source_meta.absolute,
+                        "rotation_type": RotationType.ROTATION_6D,
+                        "shape": [6],
+                        "continuous": True,
+                    }
+                    if output_subkey not in dataset_statistics[modality]:
+                        dataset_statistics[modality][output_subkey] = _fixed_rotation_6d_stats()
+                    continue
+
                 if spec_type in {"copy", "rename"}:
                     source_key = str(spec.get("source_key", ""))
-                    source_modality, source_subkey = source_key.split(".", 1)
-                    if source_modality != modality:
-                        raise ValueError(f"Derived key {output_key} source {source_key} crosses modalities.")
-                    source_meta = _get_state_action_meta(le_modality_meta, modality, source_subkey)
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
                     shape = source_meta.end - source_meta.start
                     simplified_modality_meta[modality][output_subkey] = {
                         "absolute": source_meta.absolute,
@@ -1410,7 +1571,66 @@ class LeRobotSingleDataset(Dataset):
                         "continuous": bool(np.issubdtype(np.dtype(source_meta.dtype), np.floating)),
                     }
                     if output_subkey not in dataset_statistics[modality]:
-                        dataset_statistics[modality][output_subkey] = source_stat_slice(modality, source_subkey, 0, shape)
+                        if source_key in dataset_statistics[modality]:
+                            dataset_statistics[modality][output_subkey] = source_stat_slice(
+                                modality, source_key, 0, shape
+                            )
+                        elif require_source_statistics:
+                            raise ValueError(f"Missing statistics for derived source {source_key}")
+                    continue
+
+                if spec_type in {"vector_slice", "slice"}:
+                    source_key = str(spec.get("source_key", ""))
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
+                    source_width = source_meta.end - source_meta.start
+                    start = int(spec.get("start", 0))
+                    end = int(spec.get("end", source_width))
+                    if start < 0 or end <= start or end > source_width:
+                        raise ValueError(
+                            f"Derived key {output_key} has invalid slice [{start}:{end}] "
+                            f"for {source_key} width {source_width}."
+                        )
+
+                    shape = end - start
+                    simplified_modality_meta[modality][output_subkey] = {
+                        "absolute": source_meta.absolute,
+                        "rotation_type": source_meta.rotation_type,
+                        "shape": [shape],
+                        "continuous": bool(np.issubdtype(np.dtype(source_meta.dtype), np.floating)),
+                    }
+                    if output_subkey not in dataset_statistics[modality]:
+                        if source_key in dataset_statistics[modality]:
+                            dataset_statistics[modality][output_subkey] = source_stat_slice(
+                                modality, source_key, start, end
+                            )
+                        elif require_source_statistics:
+                            raise ValueError(f"Missing statistics for derived source {source_key}")
+                    continue
+
+                if spec_type in {"vector_rpy_rotation_6d", "vector_euler_rpy_rotation_6d"}:
+                    source_key = str(spec.get("source_key", ""))
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
+                    source_width = source_meta.end - source_meta.start
+                    start = int(spec.get("start", 0))
+                    end = int(spec.get("end", source_width))
+                    if end - start != 3 or start < 0 or end > source_width:
+                        raise ValueError(
+                            f"Derived key {output_key} requires a 3D RPY slice, got [{start}:{end}] "
+                            f"for {source_key} width {source_width}."
+                        )
+
+                    simplified_modality_meta[modality][output_subkey] = {
+                        "absolute": source_meta.absolute,
+                        "rotation_type": RotationType.ROTATION_6D,
+                        "shape": [6],
+                        "continuous": True,
+                    }
+                    if output_subkey not in dataset_statistics[modality]:
+                        dataset_statistics[modality][output_subkey] = _fixed_rotation_6d_stats()
                     continue
 
                 if spec_type in {"rpy_to_rotation_6d", "euler_rpy_to_rotation_6d"}:
@@ -1420,10 +1640,9 @@ class LeRobotSingleDataset(Dataset):
 
                     source_metas = []
                     for source_key in source_keys:
-                        source_modality, source_subkey = source_key.split(".", 1)
-                        if source_modality != modality:
-                            raise ValueError(f"Derived key {output_key} source {source_key} crosses modalities.")
-                        source_metas.append(_get_state_action_meta(le_modality_meta, modality, source_subkey))
+                        if source_key not in config.modality_keys:
+                            raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                        source_metas.append(_get_state_action_meta_from_info(self.lerobot_info_meta, source_key))
 
                     simplified_modality_meta[modality][output_subkey] = {
                         "absolute": all(meta.absolute for meta in source_metas),
@@ -1436,10 +1655,9 @@ class LeRobotSingleDataset(Dataset):
 
                 if spec_type in {"pose_quat_position", "pose_quaternion_position"}:
                     source_key = str(spec.get("source_key", ""))
-                    source_modality, source_subkey = source_key.split(".", 1)
-                    if source_modality != modality:
-                        raise ValueError(f"Derived key {output_key} source {source_key} crosses modalities.")
-                    source_meta = _get_state_action_meta(le_modality_meta, modality, source_subkey)
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
                     if source_meta.end - source_meta.start < 7:
                         raise ValueError(f"Derived key {output_key} source {source_key} must be a 7D pose.")
 
@@ -1450,15 +1668,17 @@ class LeRobotSingleDataset(Dataset):
                         "continuous": True,
                     }
                     if output_subkey not in dataset_statistics[modality]:
-                        dataset_statistics[modality][output_subkey] = source_stat_slice(modality, source_subkey, 0, 3)
+                        if source_key in dataset_statistics[modality]:
+                            dataset_statistics[modality][output_subkey] = source_stat_slice(modality, source_key, 0, 3)
+                        elif require_source_statistics:
+                            raise ValueError(f"Missing statistics for derived source {source_key}")
                     continue
 
                 if spec_type in {"pose_quat_rotation_6d", "pose_quaternion_rotation_6d"}:
                     source_key = str(spec.get("source_key", ""))
-                    source_modality, source_subkey = source_key.split(".", 1)
-                    if source_modality != modality:
-                        raise ValueError(f"Derived key {output_key} source {source_key} crosses modalities.")
-                    source_meta = _get_state_action_meta(le_modality_meta, modality, source_subkey)
+                    if source_key not in config.modality_keys:
+                        raise ValueError(f"Derived key {output_key} source {source_key} is not in {modality} raw keys.")
+                    source_meta = _get_state_action_meta_from_info(self.lerobot_info_meta, source_key)
                     if source_meta.end - source_meta.start < 7:
                         raise ValueError(f"Derived key {output_key} source {source_key} must be a 7D pose.")
 
@@ -1880,9 +2100,10 @@ class LeRobotSingleDataset(Dataset):
     def _get_lerobot_modality_meta(self) -> LeRobotModalityMetadata:
         """Get the metadata for the LeRobot dataset."""
         modality_meta_path = self.dataset_path / LE_ROBOT_MODALITY_FILENAME
-        assert modality_meta_path.exists(), f"Please provide a {LE_ROBOT_MODALITY_FILENAME} file in {self.dataset_path}"
         info_meta_path = self.dataset_path / LE_ROBOT_INFO_FILENAME
         assert info_meta_path.exists(), f"Please provide a {LE_ROBOT_INFO_FILENAME} file in {self.dataset_path}"
+        if not modality_meta_path.exists():
+            return _build_direct_lerobot_modality_metadata(self.modality_configs, self.lerobot_info_meta)
         return _load_lerobot_modality_metadata(modality_meta_path, info_meta_path)
 
     def _get_lerobot_info_meta(self) -> dict:
@@ -1947,15 +2168,18 @@ class LeRobotSingleDataset(Dataset):
         """Use the config to check if the keys are valid and detect silent data corruption."""
         ERROR_MSG_HEADER = f"Error occurred in initializing dataset {self.dataset_name}:\n"
 
-        for modality_config in self.modality_configs.values():
+        for modality, modality_config in self.modality_configs.items():
             for key in modality_config.modality_keys:
                 if key == "lapa_action" or key == "dream_actions":
                     continue  # no need for any metadata for lapa actions because it comes normalized
                 # Check if the key is valid
                 try:
-                    _get_key_meta_with_action_fallback(self.lerobot_modality_meta, key)
+                    if modality in {"state", "action"}:
+                        _get_state_action_meta_from_info(self.lerobot_info_meta, key)
+                    else:
+                        _get_key_meta_strict(self.lerobot_modality_meta, key)
                 except Exception as e:
-                    raise ValueError(ERROR_MSG_HEADER + f"Unable to find key {key} in modality metadata:\n{e}")
+                    raise ValueError(ERROR_MSG_HEADER + f"Unable to find key {key} in dataset metadata:\n{e}")
 
     def set_transforms_metadata(self, metadata: DatasetMetadata):
         """Set the metadata for the transforms. This is useful for transforms that need to know the metadata, such as the normalization values."""
@@ -2193,7 +2417,8 @@ class LeRobotSingleDataset(Dataset):
         return output
 
     def get_video_path(self, trajectory_id: int, key: str) -> Path:
-        original_key = self.lerobot_modality_meta.video[key].original_key
+        video_meta = self.lerobot_modality_meta.video.get(key)
+        original_key = video_meta.original_key if video_meta is not None else None
         if original_key is None:
             original_key = key
         return self._format_dataset_path(self.video_path_pattern, trajectory_id, video_key=original_key)
@@ -2236,7 +2461,8 @@ class LeRobotSingleDataset(Dataset):
         video_timestamp = timestamp[step_indices]
         episode_meta = self.trajectory_ids_to_metadata.get(trajectory_id, {})
         from_timestamps = episode_meta.get("videos/from_timestamps", {})
-        original_video_key = self.lerobot_modality_meta.video[key].original_key
+        video_meta = self.lerobot_modality_meta.video.get(key)
+        original_video_key = video_meta.original_key if video_meta is not None else None
         if original_video_key is None:
             original_video_key = key
         from_timestamp = float(from_timestamps.get(original_video_key, 0.0))
@@ -2277,14 +2503,10 @@ class LeRobotSingleDataset(Dataset):
         trajectory_index = self.get_trajectory_index(trajectory_id)
         # Get the maximum length of the trajectory
         max_length = self.trajectory_lengths[trajectory_index]
-        assert key.startswith(modality + "."), f"{key} must start with {modality + '.'}, got {key}"
-        # Get the sub-key, e.g. state.joint_angles -> joint_angles
-        key = key.replace(modality + ".", "")
-        # Get the lerobot key
-        le_state_or_action_cfg = _get_state_action_meta(self.lerobot_modality_meta, modality, key)
+        raw_key = key
+        # For state/action, the configured raw key is the exact LeRobot feature/parquet key.
+        le_state_or_action_cfg = _get_state_action_meta_from_info(self.lerobot_info_meta, raw_key)
         le_key = le_state_or_action_cfg.original_key
-        if le_key is None:
-            le_key = key
         # Get the data array, shape: (T, D)
         assert self.curr_traj_data is not None, f"No data found for {trajectory_id=}"
         assert le_key in self.curr_traj_data.columns, f"No {le_key} found in {trajectory_id=}"
@@ -2298,7 +2520,7 @@ class LeRobotSingleDataset(Dataset):
         )
         data_array = data_array[:, le_indices]
         # Get the state or action configuration
-        state_or_action_cfg = getattr(self.metadata.modalities, modality)[key]
+        state_or_action_cfg = getattr(self.metadata.modalities, modality)[raw_key]
 
         # Pad the data
         return self.retrieve_data_and_pad(
@@ -2340,15 +2562,15 @@ class LeRobotSingleDataset(Dataset):
         task_indices: list[int] = []
         assert key.startswith("annotation."), f"Language key must start with 'annotation.', got {key}"
         subkey = key.replace("annotation.", "")
-        annotation_meta = self.lerobot_modality_meta.annotation
-        assert annotation_meta is not None, f"Annotation metadata is None for {subkey}"
-        assert (
-            subkey in annotation_meta
-        ), f"Annotation key {subkey} not found in metadata, available annotation keys: {annotation_meta.keys()}"
-        subkey_meta = annotation_meta[subkey]
-        original_key = subkey_meta.original_key
+        annotation_meta = self.lerobot_modality_meta.annotation or {}
+        subkey_meta = annotation_meta.get(subkey)
+        candidate_keys = []
+        if subkey_meta is not None and subkey_meta.original_key is not None:
+            candidate_keys.append(subkey_meta.original_key)
+        candidate_keys.extend([key, subkey, "task_index"])
+        original_key = next((candidate for candidate in candidate_keys if candidate in self.curr_traj_data.columns), None)
         if original_key is None:
-            original_key = key
+            original_key = candidate_keys[0]
         if original_key not in self.curr_traj_data.columns:
             episode_tasks = self.trajectory_ids_to_metadata.get(trajectory_id, {}).get("tasks")
             if isinstance(episode_tasks, list) and episode_tasks:

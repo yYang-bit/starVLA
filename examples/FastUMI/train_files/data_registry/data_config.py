@@ -1,232 +1,323 @@
-"""FastUMI-100K data config, embodiment tags, and example mixtures."""
+from typing import Any
+
+import numpy as np
+import pytorch3d.transforms as pt
+import torch
+from pydantic import Field
 
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
-from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
+from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform, ModalityTransform
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
-    RpyToRotation6DTransform,
+    RelativePoseActionTransform,
     StateActionToTensor,
     StateActionTransform,
 )
+from starVLA.dataloader.gr00t_lerobot.transform.video import (
+    VideoColorJitter,
+    VideoCrop,
+    VideoResize,
+    VideoToNumpy,
+    VideoToTensor,
+)
 
 
-def _rpy_group(modality: str, prefix: str = "") -> list[str]:
-    stem = f"{prefix}_" if prefix else ""
-    return [
-        f"{modality}.{stem}roll",
-        f"{modality}.{stem}pitch",
-        f"{modality}.{stem}yaw",
-    ]
+FASTUMI_DUAL_ARM_TASKS = [
+    "Add_Rice_to_Rice_Cooker",
+    "Arrange_Toothbrush_and_Toothpaste",
+    "Clean_Desktop",
+    "Dispose_of_Desktop_Debris",
+    "Fold_the_Jeans",
+    "Fold_the_Suit",
+    "Fold_the_T-shirt",
+    "Open_Double_Door_Cabinet",
+    "Open_Double_Door_Shoe_Cabinet",
+    "Pack_Skincare_Products",
+    "Place_Pot_on_Induction_Cooktop",
+    "Place_Shoes_and_Close_Shoe_Cabinet",
+    "Pour_Water_into_Teacup",
+]
 
 
-class FastUMISingleArmDataConfig:
-    video_keys = ["video.primary_image"]
-    state_keys = [
-        "state.x",
-        "state.y",
-        "state.z",
-        "state.roll",
-        "state.pitch",
-        "state.yaw",
-        "state.gripper",
-    ]
-    action_keys = [
-        "action.x",
-        "action.y",
-        "action.z",
-        "action.roll",
-        "action.pitch",
-        "action.yaw",
-        "action.gripper",
-    ]
-    state_output_keys = ["state.x", "state.y", "state.z", "state.rotation_6d", "state.gripper"]
-    action_output_keys = ["action.x", "action.y", "action.z", "action.rotation_6d", "action.gripper"]
-    language_keys = ["annotation.human.action.task_description"]
+class DerivedKeysTransform(ModalityTransform):
+    """Create output keys from raw keys using keep_from_origin / transform_from_origin specs."""
 
-    observation_indices = [0]
-    state_indices = [0]
-    action_indices = list(range(16))
+    derived_keys: dict[str, dict[str, Any]] = Field(
+        ...,
+        description="Mapping from output key to source slicing or representation transform spec.",
+    )
+    drop_source_keys: bool = Field(default=True, description="Remove raw keys after all derived outputs are created.")
 
-    def modality_config(self):
-        return {
-            "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
-            "state": ModalityConfig(
-                delta_indices=self.state_indices,
-                modality_keys=self.state_keys,
-                output_keys=self.state_output_keys,
-                derived_keys={
-                    "state.rotation_6d": {
-                        "type": "rpy_to_rotation_6d",
-                        "source_keys": _rpy_group("state"),
-                    }
-                },
-            ),
-            "action": ModalityConfig(
-                delta_indices=self.action_indices,
-                modality_keys=self.action_keys,
-                output_keys=self.action_output_keys,
-                derived_keys={
-                    "action.rotation_6d": {
-                        "type": "rpy_to_rotation_6d",
-                        "source_keys": _rpy_group("action"),
-                    }
-                },
-            ),
-            "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
-        }
+    def model_dump(self, *args, **kwargs):
+        if kwargs.get("mode", "python") == "json":
+            include = {"apply_to", "derived_keys", "drop_source_keys"}
+        else:
+            include = kwargs.pop("include", None)
+        return super().model_dump(*args, include=include, **kwargs)
 
-    def transform(self, data_cfg=None):
-        output_keys = self.state_output_keys + self.action_output_keys
-        return ComposedModalityTransform(
-            transforms=[
-                RpyToRotation6DTransform(
-                    apply_to=self.state_keys + self.action_keys,
-                    groups={
-                        "state.rotation_6d": _rpy_group("state"),
-                        "action.rotation_6d": _rpy_group("action"),
-                    },
-                ),
-                StateActionToTensor(apply_to=output_keys),
-                StateActionTransform(
-                    apply_to=output_keys,
-                    normalization_modes={key: "min_max" for key in output_keys},
-                ),
-            ]
-        )
+    @staticmethod
+    def _as_tensor(value: Any) -> tuple[torch.Tensor, bool, torch.device | None, torch.dtype | None]:
+        if isinstance(value, torch.Tensor):
+            return value, True, value.device, value.dtype
+        array = np.asarray(value, dtype=np.float32)
+        return torch.from_numpy(array), False, None, None
+
+    @staticmethod
+    def _restore_type(
+        value: torch.Tensor,
+        source_is_tensor: bool,
+        source_device: torch.device | None,
+        source_dtype: torch.dtype | None,
+    ) -> Any:
+        if source_is_tensor:
+            assert source_device is not None and source_dtype is not None
+            return value.to(device=source_device, dtype=source_dtype)
+        return value.detach().cpu().numpy().astype(np.float32, copy=False)
+
+    @staticmethod
+    def _rotation_to_6d(value: torch.Tensor, spec: dict[str, Any]) -> torch.Tensor:
+        source_repr = str(spec.get("from", "")).lower()
+        target_repr = str(spec.get("to", "")).lower()
+        if target_repr != "rotation_6d":
+            raise ValueError(f"Only to=rotation_6d is supported, got {target_repr}")
+
+        if source_repr in {"rpy", "euler_rpy", "euler_angles_rpy"}:
+            convention = str(spec.get("convention", "XYZ"))
+            matrix = pt.euler_angles_to_matrix(value.to(torch.float32), convention=convention)
+        elif source_repr in {"quat", "quaternion", "quaternion_xyzw", "quat_xyzw"}:
+            quat_order = str(spec.get("quaternion_order", "xyzw")).lower()
+            if quat_order == "xyzw":
+                quat_wxyz = value[..., [3, 0, 1, 2]]
+            elif quat_order == "wxyz":
+                quat_wxyz = value
+            else:
+                raise ValueError(f"Unsupported quaternion_order={quat_order}")
+            matrix = pt.quaternion_to_matrix(quat_wxyz.to(torch.float32))
+        elif source_repr in {"rotation_matrix", "matrix"}:
+            matrix = value.to(torch.float32).reshape(*value.shape[:-1], 3, 3)
+        elif source_repr in {"rotation_6d", "rot6d"}:
+            if value.shape[-1] != 6:
+                raise ValueError(f"Expected rotation_6d source to have dim 6, got {tuple(value.shape)}")
+            return value.to(torch.float32)
+        else:
+            raise ValueError(f"Unsupported rotation source representation: {source_repr}")
+
+        return pt.matrix_to_rotation_6d(matrix)
+
+    @staticmethod
+    def _slice_source(source: torch.Tensor, spec: dict[str, Any]) -> torch.Tensor:
+        start = int(spec.get("start", 0))
+        end = int(spec.get("end", source.shape[-1]))
+        if start < 0 or end <= start or end > source.shape[-1]:
+            raise ValueError(f"Invalid source slice [{start}:{end}] for shape {tuple(source.shape)}")
+        return source[..., start:end]
+
+    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
+        used_source_keys: set[str] = set()
+
+        for output_key, spec in self.derived_keys.items():
+            source_key = str(spec.get("source_key", ""))
+            if source_key not in data:
+                continue
+
+            source, source_is_tensor, source_device, source_dtype = self._as_tensor(data[source_key])
+            source = source.to(torch.float32)
+            source_slice = self._slice_source(source, spec)
+            spec_type = str(spec.get("type", "")).lower()
+
+            if spec_type in {"keep_from_origin", "keep_from_orign"}:
+                output = source_slice
+            elif spec_type in {"transform_from_origin", "transform_from_orign"}:
+                output = self._rotation_to_6d(source_slice, spec)
+            else:
+                raise ValueError(f"Unsupported derived key type for {output_key}: {spec.get('type')}")
+
+            data[output_key] = self._restore_type(output, source_is_tensor, source_device, source_dtype)
+            used_source_keys.add(source_key)
+
+        if self.drop_source_keys:
+            for source_key in used_source_keys:
+                data.pop(source_key, None)
+
+        return data
 
 
 class FastUMIDualArmDataConfig:
-    video_keys = ["video.primary_image"]
+    video_keys = [
+        "video.observation.images.left_camera_rgb_image",
+        "video.observation.images.right_camera_rgb_image",
+    ]
+    raw_state_keys = ["observation.state"]
+    raw_action_keys = ["action"]
     state_keys = [
-        "state.left_x",
-        "state.left_y",
-        "state.left_z",
-        "state.left_roll",
-        "state.left_pitch",
-        "state.left_yaw",
+        "state.left_arm",
+        "state.left_ori_6d",
         "state.left_gripper",
-        "state.right_x",
-        "state.right_y",
-        "state.right_z",
-        "state.right_roll",
-        "state.right_pitch",
-        "state.right_yaw",
+        "state.right_arm",
+        "state.right_ori_6d",
         "state.right_gripper",
     ]
     action_keys = [
-        "action.left_x",
-        "action.left_y",
-        "action.left_z",
-        "action.left_roll",
-        "action.left_pitch",
-        "action.left_yaw",
+        "action.left_arm",
+        "action.left_ori_6d",
         "action.left_gripper",
-        "action.right_x",
-        "action.right_y",
-        "action.right_z",
-        "action.right_roll",
-        "action.right_pitch",
-        "action.right_yaw",
-        "action.right_gripper",
-    ]
-    state_output_keys = [
-        "state.left_x",
-        "state.left_y",
-        "state.left_z",
-        "state.left_rotation_6d",
-        "state.left_gripper",
-        "state.right_x",
-        "state.right_y",
-        "state.right_z",
-        "state.right_rotation_6d",
-        "state.right_gripper",
-    ]
-    action_output_keys = [
-        "action.left_x",
-        "action.left_y",
-        "action.left_z",
-        "action.left_rotation_6d",
-        "action.left_gripper",
-        "action.right_x",
-        "action.right_y",
-        "action.right_z",
-        "action.right_rotation_6d",
+        "action.right_arm",
+        "action.right_ori_6d",
         "action.right_gripper",
     ]
     language_keys = ["annotation.human.action.task_description"]
 
     observation_indices = [0]
+    action_indices = list(range(0, 16))
     state_indices = [0]
-    action_indices = list(range(16))
+
+    derived_keys = {
+        "state.left_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 0, "end": 3},
+        "state.left_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "observation.state",
+            "start": 3,
+            "end": 6,
+            "from": "rpy",
+            "to": "rotation_6d",
+            "convention": "XYZ",
+        },
+        "state.left_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 6, "end": 7},
+        "state.right_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 7, "end": 10},
+        "state.right_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "observation.state",
+            "start": 10,
+            "end": 13,
+            "from": "rpy",
+            "to": "rotation_6d",
+            "convention": "XYZ",
+        },
+        "state.right_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 13, "end": 14},
+        "action.left_arm": {"type": "keep_from_origin", "source_key": "action", "start": 0, "end": 3},
+        "action.left_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "action",
+            "start": 3,
+            "end": 6,
+            "from": "rpy",
+            "to": "rotation_6d",
+            "convention": "XYZ",
+        },
+        "action.left_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 6, "end": 7},
+        "action.right_arm": {"type": "keep_from_origin", "source_key": "action", "start": 7, "end": 10},
+        "action.right_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "action",
+            "start": 10,
+            "end": 13,
+            "from": "rpy",
+            "to": "rotation_6d",
+            "convention": "XYZ",
+        },
+        "action.right_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 13, "end": 14},
+    }
+
+    normalization_modes = {
+        "action.left_arm": "min_max",
+        "action.left_gripper": "min_max",
+        "action.right_arm": "min_max",
+        "action.right_gripper": "min_max",
+    }
+
+    def _derived_keys_for(self, modality: str) -> dict[str, dict[str, Any]]:
+        prefix = f"{modality}."
+        return {key: value for key, value in self.derived_keys.items() if key.startswith(prefix)}
 
     def modality_config(self):
         return {
             "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
             "state": ModalityConfig(
                 delta_indices=self.state_indices,
-                modality_keys=self.state_keys,
-                output_keys=self.state_output_keys,
-                derived_keys={
-                    "state.left_rotation_6d": {
-                        "type": "rpy_to_rotation_6d",
-                        "source_keys": _rpy_group("state", "left"),
-                    },
-                    "state.right_rotation_6d": {
-                        "type": "rpy_to_rotation_6d",
-                        "source_keys": _rpy_group("state", "right"),
-                    },
-                },
+                modality_keys=self.raw_state_keys,
+                output_keys=self.state_keys,
+                derived_keys=self._derived_keys_for("state"),
             ),
             "action": ModalityConfig(
                 delta_indices=self.action_indices,
-                modality_keys=self.action_keys,
-                output_keys=self.action_output_keys,
-                derived_keys={
-                    "action.left_rotation_6d": {
-                        "type": "rpy_to_rotation_6d",
-                        "source_keys": _rpy_group("action", "left"),
-                    },
-                    "action.right_rotation_6d": {
-                        "type": "rpy_to_rotation_6d",
-                        "source_keys": _rpy_group("action", "right"),
-                    },
-                },
+                modality_keys=self.raw_action_keys,
+                output_keys=self.action_keys,
+                derived_keys=self._derived_keys_for("action"),
             ),
             "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
         }
 
+    def video_transforms(self):
+        return [
+            VideoToTensor(apply_to=self.video_keys),
+            VideoCrop(apply_to=self.video_keys, scale=0.95),
+            VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
+            VideoColorJitter(apply_to=self.video_keys, brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
+            VideoToNumpy(apply_to=self.video_keys),
+        ]
+
+    def pose_transforms(self):
+        return [
+            DerivedKeysTransform(
+                apply_to=list(self.derived_keys),
+                derived_keys=self.derived_keys,
+                drop_source_keys=True,
+            )
+        ]
+
+    def relative_pose_transform(self):
+        return RelativePoseActionTransform(
+            apply_to=self.state_keys + self.action_keys,
+            state_keys=self.state_keys,
+            action_keys=self.action_keys,
+            arm_prefixes=["left", "right"],
+            state_position_suffix="_arm",
+            state_rotation_suffix="_ori_6d",
+            state_gripper_suffix="_gripper",
+            action_position_suffix="_arm",
+            action_rotation_suffix="_ori_6d",
+            action_gripper_suffix="_gripper",
+        )
+
     def transform(self, data_cfg=None):
-        output_keys = self.state_output_keys + self.action_output_keys
+        action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
+        if action_repr == "relative_pose":
+            return ComposedModalityTransform(
+                transforms=self.video_transforms()
+                + self.pose_transforms()
+                + [
+                    self.relative_pose_transform(),
+                    StateActionToTensor(apply_to=self.action_keys),
+                    StateActionTransform(
+                        apply_to=self.action_keys,
+                        normalization_modes=self.normalization_modes,
+                    ),
+                ]
+            )
+
+        state_action_keys = self.state_keys + self.action_keys
         return ComposedModalityTransform(
-            transforms=[
-                RpyToRotation6DTransform(
-                    apply_to=self.state_keys + self.action_keys,
-                    groups={
-                        "state.left_rotation_6d": _rpy_group("state", "left"),
-                        "state.right_rotation_6d": _rpy_group("state", "right"),
-                        "action.left_rotation_6d": _rpy_group("action", "left"),
-                        "action.right_rotation_6d": _rpy_group("action", "right"),
-                    },
-                ),
-                StateActionToTensor(apply_to=output_keys),
+            transforms=self.video_transforms()
+            + self.pose_transforms()
+            + [
+                StateActionToTensor(apply_to=state_action_keys),
                 StateActionTransform(
-                    apply_to=output_keys,
-                    normalization_modes={key: "min_max" for key in output_keys},
+                    apply_to=state_action_keys,
+                    normalization_modes=self.normalization_modes,
                 ),
             ]
         )
 
 
 ROBOT_TYPE_CONFIG_MAP = {
-    "fastumi_single_arm": FastUMISingleArmDataConfig(),
     "fastumi_dual_arm": FastUMIDualArmDataConfig(),
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
-    "fastumi_single_arm": EmbodimentTag.NEW_EMBODIMENT,
     "fastumi_dual_arm": EmbodimentTag.NEW_EMBODIMENT,
 }
 
 DATASET_NAMED_MIXTURES = {
-    "fastumi_dual_arm": [("dual_arm", 1.0, "fastumi_dual_arm")],
+    # "fastumi_dual_arm": [(task, 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
+    "my_mix": [("Add_Rice_to_Rice_Cooker", 1.0, "fastumi_dual_arm")],
 }

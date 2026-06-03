@@ -22,18 +22,18 @@ from starVLA.dataloader.gr00t_lerobot.transform.video import (
 )
 
 
-class PoseQuatToRotation6DTransform(ModalityTransform):
-    """Derive position and 6D rotation keys from [x, y, z, qx, qy, qz, qw] pose keys."""
+class DerivedKeysTransform(ModalityTransform):
+    """Create output keys from raw keys using keep_from_origin / transform_from_origin specs."""
 
-    output_map: dict[str, tuple[str, str]] = Field(
+    derived_keys: dict[str, dict[str, Any]] = Field(
         ...,
-        description="Mapping from source pose key to (position_output_key, rotation_6d_output_key).",
+        description="Mapping from output key to source slicing or representation transform spec.",
     )
-    drop_source_keys: bool = Field(default=False, description="Remove source pose keys after creating output keys.")
+    drop_source_keys: bool = Field(default=True, description="Remove raw keys after all derived outputs are created.")
 
     def model_dump(self, *args, **kwargs):
         if kwargs.get("mode", "python") == "json":
-            include = {"apply_to", "output_map", "drop_source_keys"}
+            include = {"apply_to", "derived_keys", "drop_source_keys"}
         else:
             include = kwargs.pop("include", None)
         return super().model_dump(*args, include=include, **kwargs)
@@ -45,61 +45,83 @@ class PoseQuatToRotation6DTransform(ModalityTransform):
         array = np.asarray(value, dtype=np.float32)
         return torch.from_numpy(array), False, None, None
 
-    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
-        for source_key in self.apply_to:
-            if source_key not in data:
-                continue
-            if source_key not in self.output_map:
-                raise KeyError(f"Missing output_map entry for {source_key}")
+    @staticmethod
+    def _restore_type(
+        value: torch.Tensor,
+        source_is_tensor: bool,
+        source_device: torch.device | None,
+        source_dtype: torch.dtype | None,
+    ) -> Any:
+        if source_is_tensor:
+            assert source_device is not None and source_dtype is not None
+            return value.to(device=source_device, dtype=source_dtype)
+        return value.detach().cpu().numpy().astype(np.float32, copy=False)
 
-            position_key, rotation_key = self.output_map[source_key]
-            pose, source_is_tensor, source_device, source_dtype = self._as_tensor(data[source_key])
-            pose = pose.to(torch.float32)
-            if pose.shape[-1] != 7:
-                raise ValueError(f"Expected pose key {source_key} to have shape (..., 7), got {tuple(pose.shape)}")
+    @staticmethod
+    def _rotation_to_6d(value: torch.Tensor, spec: dict[str, Any]) -> torch.Tensor:
+        source_repr = str(spec.get("from", "")).lower()
+        target_repr = str(spec.get("to", "")).lower()
+        if target_repr != "rotation_6d":
+            raise ValueError(f"Only to=rotation_6d is supported, got {target_repr}")
 
-            position = pose[..., :3]
-            quat_xyzw = pose[..., 3:7]
-            quat_wxyz = quat_xyzw[..., [3, 0, 1, 2]]
-            rotation_matrix = pt.quaternion_to_matrix(quat_wxyz)
-            rotation_6d = rotation_matrix[..., :2, :].reshape(*rotation_matrix.shape[:-2], 6)
-
-            if source_is_tensor:
-                assert source_device is not None and source_dtype is not None
-                data[position_key] = position.to(device=source_device, dtype=source_dtype)
-                data[rotation_key] = rotation_6d.to(device=source_device, dtype=source_dtype)
+        if source_repr in {"rpy", "euler_rpy", "euler_angles_rpy"}:
+            convention = str(spec.get("convention", "XYZ"))
+            matrix = pt.euler_angles_to_matrix(value.to(torch.float32), convention=convention)
+        elif source_repr in {"quat", "quaternion", "quaternion_xyzw", "quat_xyzw"}:
+            quat_order = str(spec.get("quaternion_order", "xyzw")).lower()
+            if quat_order == "xyzw":
+                quat_wxyz = value[..., [3, 0, 1, 2]]
+            elif quat_order == "wxyz":
+                quat_wxyz = value
             else:
-                data[position_key] = position.detach().cpu().numpy().astype(np.float32, copy=False)
-                data[rotation_key] = rotation_6d.detach().cpu().numpy().astype(np.float32, copy=False)
-
-            if self.drop_source_keys:
-                data.pop(source_key, None)
-
-        return data
-
-
-class CopyKeysTransform(ModalityTransform):
-    """Copy raw keys to their post-transform names."""
-
-    output_map: dict[str, str] = Field(..., description="Mapping from source key to copied output key.")
-    drop_source_keys: bool = Field(default=False, description="Remove source keys after copying.")
-
-    def model_dump(self, *args, **kwargs):
-        if kwargs.get("mode", "python") == "json":
-            include = {"apply_to", "output_map", "drop_source_keys"}
+                raise ValueError(f"Unsupported quaternion_order={quat_order}")
+            matrix = pt.quaternion_to_matrix(quat_wxyz.to(torch.float32))
+        elif source_repr in {"rotation_matrix", "matrix"}:
+            matrix = value.to(torch.float32).reshape(*value.shape[:-1], 3, 3)
+        elif source_repr in {"rotation_6d", "rot6d"}:
+            if value.shape[-1] != 6:
+                raise ValueError(f"Expected rotation_6d source to have dim 6, got {tuple(value.shape)}")
+            return value.to(torch.float32)
         else:
-            include = kwargs.pop("include", None)
-        return super().model_dump(*args, include=include, **kwargs)
+            raise ValueError(f"Unsupported rotation source representation: {source_repr}")
+
+        return pt.matrix_to_rotation_6d(matrix)
+
+    @staticmethod
+    def _slice_source(source: torch.Tensor, spec: dict[str, Any]) -> torch.Tensor:
+        start = int(spec.get("start", 0))
+        end = int(spec.get("end", source.shape[-1]))
+        if start < 0 or end <= start or end > source.shape[-1]:
+            raise ValueError(f"Invalid source slice [{start}:{end}] for shape {tuple(source.shape)}")
+        return source[..., start:end]
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
-        for source_key in self.apply_to:
+        used_source_keys: set[str] = set()
+
+        for output_key, spec in self.derived_keys.items():
+            source_key = str(spec.get("source_key", ""))
             if source_key not in data:
                 continue
-            if source_key not in self.output_map:
-                raise KeyError(f"Missing output_map entry for {source_key}")
-            data[self.output_map[source_key]] = data[source_key]
-            if self.drop_source_keys:
+
+            source, source_is_tensor, source_device, source_dtype = self._as_tensor(data[source_key])
+            source = source.to(torch.float32)
+            source_slice = self._slice_source(source, spec)
+            spec_type = str(spec.get("type", "")).lower()
+
+            if spec_type in {"keep_from_origin", "keep_from_orign"}:
+                output = source_slice
+            elif spec_type in {"transform_from_origin", "transform_from_orign"}:
+                output = self._rotation_to_6d(source_slice, spec)
+            else:
+                raise ValueError(f"Unsupported derived key type for {output_key}: {spec.get('type')}")
+
+            data[output_key] = self._restore_type(output, source_is_tensor, source_device, source_dtype)
+            used_source_keys.add(source_key)
+
+        if self.drop_source_keys:
+            for source_key in used_source_keys:
                 data.pop(source_key, None)
+
         return data
 
 
@@ -109,10 +131,10 @@ class MyDataConfig:
         "video.observation.images.camera_arm_right_upper_color",
     ]
     raw_state_keys = [
-        "state.left_eef_pose",
-        "state.left_gripper_pos",
-        "state.right_eef_pose",
-        "state.right_gripper_pos",
+        "observation.left_eef_pose",
+        "observation.left_gripper_pos",
+        "observation.right_eef_pose",
+        "observation.right_gripper_pos",
     ]
     raw_action_keys = [
         "action.left_eef_pose",
@@ -142,33 +164,71 @@ class MyDataConfig:
     action_indices = list(range(0, 16))
     state_indices = [0]
 
-    pose_output_map = {
-        "state.left_eef_pose": ("state.left_arm", "state.left_ori_6d"),
-        "state.right_eef_pose": ("state.right_arm", "state.right_ori_6d"),
-        "action.left_eef_pose": ("action.left_arm", "action.left_ori_6d"),
-        "action.right_eef_pose": ("action.right_arm", "action.right_ori_6d"),
-    }
-
-    copy_output_map = {
-        "state.left_gripper_pos": "state.left_gripper",
-        "state.right_gripper_pos": "state.right_gripper",
-        "action.left_gripper_pos": "action.left_gripper",
-        "action.right_gripper_pos": "action.right_gripper",
-    }
-
     derived_keys = {
-        "state.left_arm": {"type": "pose_quat_position", "source_key": "state.left_eef_pose"},
-        "state.left_ori_6d": {"type": "pose_quat_rotation_6d", "source_key": "state.left_eef_pose"},
-        "state.left_gripper": {"type": "copy", "source_key": "state.left_gripper_pos"},
-        "state.right_arm": {"type": "pose_quat_position", "source_key": "state.right_eef_pose"},
-        "state.right_ori_6d": {"type": "pose_quat_rotation_6d", "source_key": "state.right_eef_pose"},
-        "state.right_gripper": {"type": "copy", "source_key": "state.right_gripper_pos"},
-        "action.left_arm": {"type": "pose_quat_position", "source_key": "action.left_eef_pose"},
-        "action.left_ori_6d": {"type": "pose_quat_rotation_6d", "source_key": "action.left_eef_pose"},
-        "action.left_gripper": {"type": "copy", "source_key": "action.left_gripper_pos"},
-        "action.right_arm": {"type": "pose_quat_position", "source_key": "action.right_eef_pose"},
-        "action.right_ori_6d": {"type": "pose_quat_rotation_6d", "source_key": "action.right_eef_pose"},
-        "action.right_gripper": {"type": "copy", "source_key": "action.right_gripper_pos"},
+        "state.left_arm": {"type": "keep_from_origin", "source_key": "observation.left_eef_pose", "start": 0, "end": 3},
+        "state.left_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "observation.left_eef_pose",
+            "start": 3,
+            "end": 7,
+            "from": "quaternion",
+            "to": "rotation_6d",
+            "quaternion_order": "xyzw",
+        },
+        "state.left_gripper": {
+            "type": "keep_from_origin",
+            "source_key": "observation.left_gripper_pos",
+            "start": 0,
+            "end": 1,
+        },
+        "state.right_arm": {"type": "keep_from_origin", "source_key": "observation.right_eef_pose", "start": 0, "end": 3},
+        "state.right_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "observation.right_eef_pose",
+            "start": 3,
+            "end": 7,
+            "from": "quaternion",
+            "to": "rotation_6d",
+            "quaternion_order": "xyzw",
+        },
+        "state.right_gripper": {
+            "type": "keep_from_origin",
+            "source_key": "observation.right_gripper_pos",
+            "start": 0,
+            "end": 1,
+        },
+        "action.left_arm": {"type": "keep_from_origin", "source_key": "action.left_eef_pose", "start": 0, "end": 3},
+        "action.left_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "action.left_eef_pose",
+            "start": 3,
+            "end": 7,
+            "from": "quaternion",
+            "to": "rotation_6d",
+            "quaternion_order": "xyzw",
+        },
+        "action.left_gripper": {
+            "type": "keep_from_origin",
+            "source_key": "action.left_gripper_pos",
+            "start": 0,
+            "end": 1,
+        },
+        "action.right_arm": {"type": "keep_from_origin", "source_key": "action.right_eef_pose", "start": 0, "end": 3},
+        "action.right_ori_6d": {
+            "type": "transform_from_origin",
+            "source_key": "action.right_eef_pose",
+            "start": 3,
+            "end": 7,
+            "from": "quaternion",
+            "to": "rotation_6d",
+            "quaternion_order": "xyzw",
+        },
+        "action.right_gripper": {
+            "type": "keep_from_origin",
+            "source_key": "action.right_gripper_pos",
+            "start": 0,
+            "end": 1,
+        },
     }
 
     normalization_modes = {
@@ -178,6 +238,10 @@ class MyDataConfig:
         "action.right_gripper": "min_max",
     }
 
+    def _derived_keys_for(self, modality: str) -> dict[str, dict[str, Any]]:
+        prefix = f"{modality}."
+        return {key: value for key, value in self.derived_keys.items() if key.startswith(prefix)}
+
     def modality_config(self):
         return {
             "video": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.video_keys),
@@ -185,20 +249,17 @@ class MyDataConfig:
                 delta_indices=self.state_indices,
                 modality_keys=self.raw_state_keys,
                 output_keys=self.state_keys,
-                derived_keys={
-                    key: value for key, value in self.derived_keys.items() if key.startswith("state.")
-                },
+                derived_keys=self._derived_keys_for("state"),
             ),
             "action": ModalityConfig(
                 delta_indices=self.action_indices,
                 modality_keys=self.raw_action_keys,
                 output_keys=self.action_keys,
-                derived_keys={
-                    key: value for key, value in self.derived_keys.items() if key.startswith("action.")
-                },
+                derived_keys=self._derived_keys_for("action"),
             ),
             "language": ModalityConfig(delta_indices=self.observation_indices, modality_keys=self.language_keys),
         }
+
     def video_transforms(self):
         return [
             VideoToTensor(apply_to=self.video_keys),
@@ -208,20 +269,28 @@ class MyDataConfig:
             VideoToNumpy(apply_to=self.video_keys),
         ]
 
-#pose_output_map
     def pose_transforms(self):
         return [
-            PoseQuatToRotation6DTransform(
-                apply_to=list(self.pose_output_map.keys()),
-                output_map=self.pose_output_map,
+            DerivedKeysTransform(
+                apply_to=list(self.derived_keys),
+                derived_keys=self.derived_keys,
                 drop_source_keys=True,
-            ),
-            CopyKeysTransform(
-                apply_to=list(self.copy_output_map.keys()),
-                output_map=self.copy_output_map,
-                drop_source_keys=True,
-            ),
+            )
         ]
+
+    def relative_pose_transform(self):
+        return RelativePoseActionTransform(
+            apply_to=self.state_keys + self.action_keys,
+            state_keys=self.state_keys,
+            action_keys=self.action_keys,
+            arm_prefixes=["left", "right"],
+            state_position_suffix="_arm",
+            state_rotation_suffix="_ori_6d",
+            state_gripper_suffix="_gripper",
+            action_position_suffix="_arm",
+            action_rotation_suffix="_ori_6d",
+            action_gripper_suffix="_gripper",
+        )
 
     def transform(self, data_cfg=None):
         action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
@@ -230,26 +299,11 @@ class MyDataConfig:
                 transforms=self.video_transforms()
                 + self.pose_transforms()
                 + [
-                    RelativePoseActionTransform(
-                        apply_to=self.state_keys + self.action_keys,
-                        state_keys=self.state_keys,
-                        action_keys=self.action_keys,
-                        arm_prefixes=["left", "right"],
-                        state_position_suffix="_arm",
-                        state_rotation_suffix="_ori_6d",
-                        state_gripper_suffix="_gripper",
-                        action_position_suffix="_arm",
-                        action_rotation_suffix="_ori_6d",
-                        action_gripper_suffix="_gripper",
-                    ),
+                    self.relative_pose_transform(),
                     StateActionToTensor(apply_to=self.action_keys),
                     StateActionTransform(
                         apply_to=self.action_keys,
-                        normalization_modes={
-                            key: value
-                            for key, value in self.normalization_modes.items()
-                            if key.startswith("action.")
-                        },
+                        normalization_modes=self.normalization_modes,
                     ),
                 ]
             )
@@ -278,6 +332,6 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 
 DATASET_NAMED_MIXTURES = {
     "my_mix": [
-        ("lerobot", 1.0, "my_robot"),
+        ("unknown", 1.0, "my_robot"),
     ],
 }
