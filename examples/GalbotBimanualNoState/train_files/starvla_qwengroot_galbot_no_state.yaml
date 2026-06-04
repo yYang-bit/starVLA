@@ -9,9 +9,9 @@ is_debug: false
 framework:
   name: QwenGR00T
   qwenvl:
-    base_vlm: /mnt/home/liuyi/models/starVLA/Pretrained_models/Qwen2.5-VL-3B-Instruct
+    base_vlm: /mnt/home/liuyi/models/starVLA/Pretrained_models/Qwen3.5-2B
     attn_implementation: flash_attention_2
-    vl_hidden_dim: 2048
+    vl_hidden_dim: 2048  # Qwen3.5-2B hidden_dim is 2048
   action_model:
     action_model_type: DiT-B
     hidden_size: 1024
