@@ -64,6 +64,7 @@ class DerivedKeysTransform(ModalityTransform):
         apply_to: list[str],
         derived_keys: dict[str, dict[str, Any]],
         drop_source_keys: bool = False,
+        **kwargs,
     ):
         """
         Args:
@@ -82,7 +83,7 @@ class DerivedKeysTransform(ModalityTransform):
                 }
             drop_source_keys: Whether to remove source keys after derivation
         """
-        super().__init__(apply_to)
+        super().__init__(apply_to=apply_to, **kwargs)
         self.derived_keys = derived_keys
         self.drop_source_keys = drop_source_keys
 
@@ -184,6 +185,10 @@ class DerivedKeysTransform(ModalityTransform):
                 data.pop(source_key, None)
 
         return data
+
+    def apply(self, data: dict) -> dict:
+        """Apply method required by ModalityTransform base class."""
+        return self.forward(data)
 
 
 class FastUMIDualArmDataConfig:
