@@ -1007,8 +1007,19 @@ class ModalityConfig(BaseModel):
 
     delta_indices: list[int]
     """Delta indices to sample relative to the current index. The returned data will correspond to the original data at a sampled base index + delta indices."""
+
     modality_keys: list[str]
-    """The keys to load for the modality in the dataset."""
+    """The keys to load for the modality in the dataset (raw keys from parquet files)."""
+
+    output_keys: list[str] | None = None
+    """The keys produced after transforms and packed into batch.
+    If None, defaults to modality_keys (backward compatible).
+    Use this when transforms derive new keys from raw keys (e.g., FastUMI derived_keys)."""
+
+    derived_keys: dict[str, dict] = Field(default_factory=dict)
+    """Specifications for deriving output_keys from modality_keys.
+    Used by DerivedKeysTransform to split/transform raw data.
+    Format: {"output_key": {"type": "...", "source_key": "...", ...}}"""
 
 
 class LeRobotSingleDataset(Dataset):
@@ -1703,17 +1714,27 @@ class LeRobotSingleDataset(Dataset):
         """Get the modality keys for the dataset.
         The keys are the modality names, and the values are the keys for each modality.
         See property `modality_keys` for the expected format.
+
+        Uses output_keys if specified, otherwise falls back to modality_keys (backward compatible).
         """
         modality_keys = defaultdict(list)
         for modality, config in self.modality_configs.items():
-            modality_keys[modality] = config.modality_keys
+            # Use output_keys if specified, otherwise fallback to modality_keys
+            # This enables transforms (like DerivedKeysTransform) to produce new keys
+            keys = config.output_keys if config.output_keys is not None else config.modality_keys
+            modality_keys[modality] = keys
         return modality_keys
 
     def _get_delta_indices(self) -> dict[str, np.ndarray]:
-        """Restructure the delta indices to use modality.key as keys instead of just the modalities."""
+        """Restructure the delta indices to use modality.key as keys instead of just the modalities.
+
+        Uses output_keys if specified, otherwise modality_keys (backward compatible).
+        """
         delta_indices: dict[str, np.ndarray] = {}
         for config in self.modality_configs.values():
-            for key in config.modality_keys:
+            # Use output_keys if specified, otherwise fallback to modality_keys
+            keys = config.output_keys if config.output_keys is not None else config.modality_keys
+            for key in keys:
                 delta_indices[key] = np.array(config.delta_indices)
         return delta_indices
 
