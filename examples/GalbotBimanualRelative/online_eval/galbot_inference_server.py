@@ -11,7 +11,13 @@ Server 端职责:
 
 Client 端建议:
   - 在 client 端将图像 resize 到模型输入尺寸 (e.g. 224x224) 再发送，减少传输量
-  - 发送双臂 abs eef pose: left [xyz(3), rot6d(6), gripper(1)] + right [xyz(3), rot6d(6), gripper(1)]
+  - 发送双臂 abs eef pose: xyz (米) + quaternion [x,y,z,w]
+  - 接收 delta_action: xyz (米) + rotation matrix (3x3)
+
+Units and Conventions:
+  - xyz: meters (m)
+  - rotation: 3x3 rotation matrix (SO(3))
+  - gripper: binary {0, 1}
 
 HTTP API:
   POST /infer
@@ -22,15 +28,39 @@ HTTP API:
         "right_wrist": "<base64_encoded_jpeg_or_array>"
       },
       "abs_eef_pose": {
-        "left": [x, y, z, r00, r01, r02, r10, r11, r12, gripper],   # 10D
-        "right": [x, y, z, r00, r01, r02, r10, r11, r12, gripper]   # 10D
+        "left": {
+          "xyz": [x, y, z],              # meters
+          "quat": [qx, qy, qz, qw]       # quaternion [x,y,z,w] convention
+        },
+        "right": {
+          "xyz": [x, y, z],
+          "quat": [qx, qy, qz, qw]
+        }
       }
     }
+
   Response JSON:
     {
-      "delta_action": [20D list],  # 物理单位的 delta action
+      "delta_action": [
+        {
+          "left": {
+            "xyz": [dx, dy, dz],                    # meters
+            "rotation": [[r00,r01,r02],
+                         [r10,r11,r12],
+                         [r20,r21,r22]],            # 3x3 SO(3) matrix
+            "gripper": 0 or 1                       # binary
+          },
+          "right": {...}
+        },
+        ... (action_horizon steps)
+      ],
       "inference_time_ms": float
     }
+
+Client-side execution:
+  xyz_target = xyz_current + delta_xyz
+  R_target = R_current @ delta_rotation
+  quat_target = Rotation.from_matrix(R_target).as_quat()
 
 Usage:
   python galbot_inference_server.py \\
@@ -121,33 +151,47 @@ def decode_image(value: Any) -> np.ndarray:
 # ==========================================
 # Relative Pose Computation
 # ==========================================
-def compute_dual_relative_pose(left_pose: np.ndarray, right_pose: np.ndarray) -> np.ndarray:
+def quat_to_rot6d(quat: np.ndarray) -> np.ndarray:
+    """
+    Convert quaternion to rot6d (first two columns of rotation matrix).
+
+    Args:
+        quat: [4] quaternion [x, y, z, w]
+
+    Returns:
+        rot6d: [6] = [R[:,0], R[:,1]] flattened
+    """
+    from scipy.spatial.transform import Rotation
+    R = Rotation.from_quat(quat).as_matrix()  # (3, 3)
+    from starVLA.dataloader.gr00t_lerobot.transform.rotation_utils import matrix_to_rot6d
+    return matrix_to_rot6d(R[None, :])[0]  # (6,)
+
+
+def compute_dual_relative_pose(left_pose: dict, right_pose: dict) -> np.ndarray:
     """
     Compute left arm's pose in right arm's coordinate frame.
 
     Args:
-        left_pose: [10] = [xyz(3), rot6d(6), gripper(1)]
-        right_pose: [10] = [xyz(3), rot6d(6), gripper(1)]
+        left_pose: {"xyz": [3], "quat": [4]}
+        right_pose: {"xyz": [3], "quat": [4]}
 
     Returns:
         dual_relative_pose: [9] = [rel_xyz(3), rel_rot6d(6)]
     """
-    from starVLA.dataloader.gr00t_lerobot.transform.rotation_utils import (
-        rot6d_to_matrix,
-        matrix_to_rot6d,
-    )
+    from scipy.spatial.transform import Rotation
+    from starVLA.dataloader.gr00t_lerobot.transform.rotation_utils import matrix_to_rot6d
 
-    left_xyz = left_pose[:3]
-    left_rot6d = left_pose[3:9]
-    right_xyz = right_pose[:3]
-    right_rot6d = right_pose[3:9]
+    left_xyz = np.array(left_pose["xyz"], dtype=np.float32)
+    left_quat = np.array(left_pose["quat"], dtype=np.float32)
+    right_xyz = np.array(right_pose["xyz"], dtype=np.float32)
+    right_quat = np.array(right_pose["quat"], dtype=np.float32)
 
     # Relative position: R_right^T @ (p_left - p_right)
-    R_right = rot6d_to_matrix(right_rot6d[None, :])[0]  # (3, 3)
+    R_right = Rotation.from_quat(right_quat).as_matrix()
     rel_xyz = R_right.T @ (left_xyz - right_xyz)
 
     # Relative rotation: R_right^T @ R_left
-    R_left = rot6d_to_matrix(left_rot6d[None, :])[0]  # (3, 3)
+    R_left = Rotation.from_quat(left_quat).as_matrix()
     R_rel = R_right.T @ R_left
     rel_rot6d = matrix_to_rot6d(R_rel[None, :])[0]  # (6,)
 
@@ -166,14 +210,14 @@ def unnormalize_delta_action(normalized_action: np.ndarray, stats: dict) -> np.n
         stats: dict with keys "action" -> {"q01": list, "q99": list}
 
     Returns:
-        physical_action: [T, 20] in physical units (mm for pos, ori_6d unchanged, gripper binary)
+        physical_action: [T, 20] in physical units (meters for pos, ori_6d unchanged, gripper binary)
     """
     action_stats = stats["statistics"]["action"]
     q01 = np.array(action_stats["q01"], dtype=np.float32)
     q99 = np.array(action_stats["q99"], dtype=np.float32)
 
     # Only unnormalize pos dimensions: [0:3] left_pos, [10:13] right_pos
-    # ori_6d and gripper are not normalized
+    # ori_6d and gripper are not normalized during training
     pos_indices = list(range(0, 3)) + list(range(10, 13))
 
     physical = normalized_action.copy()
@@ -184,20 +228,71 @@ def unnormalize_delta_action(normalized_action: np.ndarray, stats: dict) -> np.n
     return physical
 
 
+def convert_action_to_response_format(delta_action: np.ndarray) -> list[dict]:
+    """
+    Convert [T, 20] delta action to response format.
+
+    Args:
+        delta_action: [T, 20] = left [xyz(3), rot6d(6), gripper(1)] + right [xyz(3), rot6d(6), gripper(1)]
+
+    Returns:
+        List of dicts with structure:
+        [
+          {
+            "left": {"xyz": [3], "rotation": [[3,3]], "gripper": float},
+            "right": {"xyz": [3], "rotation": [[3,3]], "gripper": float}
+          },
+          ...
+        ]
+    """
+    from starVLA.dataloader.gr00t_lerobot.transform.rotation_utils import rot6d_to_matrix
+
+    result = []
+    for t in range(delta_action.shape[0]):
+        # Parse action at timestep t
+        left_xyz = delta_action[t, 0:3]
+        left_rot6d = delta_action[t, 3:9]
+        left_gripper = delta_action[t, 9]
+
+        right_xyz = delta_action[t, 10:13]
+        right_rot6d = delta_action[t, 13:19]
+        right_gripper = delta_action[t, 19]
+
+        # Convert rot6d to 3x3 rotation matrix
+        left_R = rot6d_to_matrix(left_rot6d[None, :])[0]  # (3, 3)
+        right_R = rot6d_to_matrix(right_rot6d[None, :])[0]  # (3, 3)
+
+        result.append({
+            "left": {
+                "xyz": left_xyz.tolist(),
+                "rotation": left_R.tolist(),
+                "gripper": float(left_gripper),
+            },
+            "right": {
+                "xyz": right_xyz.tolist(),
+                "rotation": right_R.tolist(),
+                "gripper": float(right_gripper),
+            },
+        })
+
+    return result
+
+
 # ==========================================
 # Model Inference
 # ==========================================
 @torch.no_grad()
-def run_inference(images: dict[str, np.ndarray], abs_eef_pose: dict[str, np.ndarray]) -> np.ndarray:
+def run_inference(images: dict[str, np.ndarray], abs_eef_pose: dict) -> list[dict]:
     """
     Run model inference.
 
     Args:
         images: {"left_wrist": [H,W,3], "right_wrist": [H,W,3]} uint8 RGB
-        abs_eef_pose: {"left": [10], "right": [10]} float32
+        abs_eef_pose: {"left": {"xyz": [3], "quat": [4]}, "right": {"xyz": [3], "quat": [4]}}
 
     Returns:
-        delta_action: [action_horizon, 20] physical units
+        delta_action: list of dicts, each with structure:
+          {"left": {"xyz": [3], "rotation": [[3,3]], "gripper": float}, "right": {...}}
     """
     # 1. Prepare images (to tensor, normalize to [0, 1])
     left_img = torch.from_numpy(images["left_wrist"]).permute(2, 0, 1).float() / 255.0  # (3, H, W)
@@ -229,7 +324,8 @@ def run_inference(images: dict[str, np.ndarray], abs_eef_pose: dict[str, np.ndar
     # 5. Unnormalize
     physical_actions = unnormalize_delta_action(normalized_actions, ctx.stats)
 
-    return physical_actions
+    # 6. Convert to response format (xyz + 3x3 rotation matrix)
+    return convert_action_to_response_format(physical_actions)
 
 
 # ==========================================
@@ -246,11 +342,8 @@ def infer():
             "right_wrist": decode_image(data["images"]["right_wrist"]),
         }
 
-        # Parse abs eef pose
-        abs_eef_pose = {
-            "left": np.array(data["abs_eef_pose"]["left"], dtype=np.float32),
-            "right": np.array(data["abs_eef_pose"]["right"], dtype=np.float32),
-        }
+        # Parse abs eef pose (new format: xyz + quat)
+        abs_eef_pose = data["abs_eef_pose"]
 
         # Run inference
         t0 = time.time()
@@ -258,7 +351,7 @@ def infer():
         inference_time_ms = (time.time() - t0) * 1000
 
         return jsonify({
-            "delta_action": delta_action.tolist(),
+            "delta_action": delta_action,
             "inference_time_ms": inference_time_ms,
         })
 

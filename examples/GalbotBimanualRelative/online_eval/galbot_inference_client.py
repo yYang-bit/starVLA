@@ -4,17 +4,25 @@ StarVLA Dual-Arm Inference Client Template
 ===========================================
 
 Client 端职责:
-  1. 读取机器人状态（双臂 abs eef pose）
+  1. 读取机器人状态（双臂 abs eef pose: xyz 米 + 四元数）
   2. 采集双臂腕部相机图像
   3. (可选) 在 client 端 resize 图像到模型输入尺寸，减少网络传输
   4. 发送数据给 server 端
-  5. 接收物理单位的 delta_action
-  6. 执行机器人控制：abs[t+1] = abs[t] + delta[t]
+  5. 接收物理单位的 delta_action (xyz 米 + 3x3 rotation matrix)
+  6. 执行机器人控制：
+     - xyz_target = xyz_current + delta_xyz
+     - R_target = R_current @ delta_rotation
+     - quat_target = Rotation.from_matrix(R_target).as_quat()
 
-通信协议:
+Units and Conventions:
+  - xyz: meters (m)
+  - rotation: quaternion [x, y, z, w] (scipy convention)
+  - gripper: binary {0, 1}
+
+Communication Protocol:
   - HTTP POST to server /infer endpoint
-  - Request: images (base64 or array) + abs_eef_pose (20D)
-  - Response: delta_action (action_horizon, 20) in physical units
+  - Request: images (base64 JPEG) + abs_eef_pose (xyz + quat)
+  - Response: delta_action list (xyz + 3x3 rotation matrix + gripper)
 
 Usage:
   python galbot_inference_client.py \\
@@ -117,20 +125,28 @@ class InferenceClient:
         self,
         left_wrist_img: np.ndarray,
         right_wrist_img: np.ndarray,
-        left_eef_pose: np.ndarray,
-        right_eef_pose: np.ndarray,
-    ) -> tuple[np.ndarray, float]:
+        left_xyz: np.ndarray,
+        left_quat: np.ndarray,
+        right_xyz: np.ndarray,
+        right_quat: np.ndarray,
+    ) -> tuple[list[dict], float]:
         """
         Send inference request to server.
 
         Args:
             left_wrist_img: [H, W, 3] uint8 RGB
             right_wrist_img: [H, W, 3] uint8 RGB
-            left_eef_pose: [10] = [xyz(3), rot6d(6), gripper(1)]
-            right_eef_pose: [10] = [xyz(3), rot6d(6), gripper(1)]
+            left_xyz: [3] meters
+            left_quat: [4] quaternion [x, y, z, w]
+            right_xyz: [3] meters
+            right_quat: [4] quaternion [x, y, z, w]
 
         Returns:
-            delta_action: [action_horizon, 20] physical units
+            delta_action: list of dicts, each with structure:
+                {
+                  "left": {"xyz": [3], "rotation": [[3,3]], "gripper": float},
+                  "right": {"xyz": [3], "rotation": [[3,3]], "gripper": float}
+                }
             inference_time_ms: server-side inference time
         """
         # Encode images
@@ -144,8 +160,14 @@ class InferenceClient:
                 "right_wrist": right_b64,
             },
             "abs_eef_pose": {
-                "left": left_eef_pose.tolist(),
-                "right": right_eef_pose.tolist(),
+                "left": {
+                    "xyz": left_xyz.tolist(),
+                    "quat": left_quat.tolist(),
+                },
+                "right": {
+                    "xyz": right_xyz.tolist(),
+                    "quat": right_quat.tolist(),
+                },
             },
         }
 
@@ -162,7 +184,7 @@ class InferenceClient:
             raise RuntimeError(f"Server returned {resp.status_code}: {resp.text}")
 
         result = resp.json()
-        delta_action = np.array(result["delta_action"], dtype=np.float32)
+        delta_action = result["delta_action"]
         inference_time_ms = result["inference_time_ms"]
 
         logger.info(
@@ -179,30 +201,26 @@ class MockRobotInterface:
     """Mock robot interface for demonstration. Replace with your actual robot API."""
 
     def __init__(self):
-        # Dummy state: 双臂 abs eef pose
-        self.left_xyz = np.array([300.0, 0.0, 200.0], dtype=np.float32)  # mm
-        self.left_rot = Rotation.identity()
+        # Dummy state: 双臂 abs eef pose (xyz in meters, quat [x,y,z,w])
+        self.left_xyz = np.array([0.3, 0.0, 0.2], dtype=np.float32)  # meters
+        self.left_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # identity
         self.left_gripper = 0.0  # 0=closed, 1=open
 
-        self.right_xyz = np.array([-300.0, 0.0, 200.0], dtype=np.float32)  # mm
-        self.right_rot = Rotation.identity()
+        self.right_xyz = np.array([-0.3, 0.0, 0.2], dtype=np.float32)  # meters
+        self.right_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # identity
         self.right_gripper = 0.0
 
-    def get_current_state(self) -> tuple[np.ndarray, np.ndarray]:
+    def get_current_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
         Get current abs eef pose.
 
         Returns:
-            left_pose: [10] = [xyz(3), rot6d(6), gripper(1)]
-            right_pose: [10] = [xyz(3), rot6d(6), gripper(1)]
+            left_xyz: [3] meters
+            left_quat: [4] quaternion [x, y, z, w]
+            right_xyz: [3] meters
+            right_quat: [4] quaternion [x, y, z, w]
         """
-        left_rot6d = self._rotation_to_rot6d(self.left_rot)
-        right_rot6d = self._rotation_to_rot6d(self.right_rot)
-
-        left_pose = np.concatenate([self.left_xyz, left_rot6d, [self.left_gripper]])
-        right_pose = np.concatenate([self.right_xyz, right_rot6d, [self.right_gripper]])
-
-        return left_pose.astype(np.float32), right_pose.astype(np.float32)
+        return self.left_xyz, self.left_quat, self.right_xyz, self.right_quat
 
     def capture_images(self, image_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -228,53 +246,45 @@ class MockRobotInterface:
 
         return left_img, right_img
 
-    def execute_delta_action(self, delta_action: np.ndarray):
+    def execute_delta_action(self, delta: dict):
         """
         Execute one step of delta action.
 
         Args:
-            delta_action: [20] = left [xyz(3), rot6d(6), gripper(1)] + right [xyz(3), rot6d(6), gripper(1)]
+            delta: dict with structure:
+                {
+                  "left": {"xyz": [3], "rotation": [[3,3]], "gripper": float},
+                  "right": {"xyz": [3], "rotation": [[3,3]], "gripper": float}
+                }
         """
         # Parse delta
-        left_delta_xyz = delta_action[0:3]
-        left_delta_rot6d = delta_action[3:9]
-        left_delta_gripper = delta_action[9]
+        left_delta_xyz = np.array(delta["left"]["xyz"], dtype=np.float32)
+        left_delta_R = np.array(delta["left"]["rotation"], dtype=np.float32)  # (3, 3)
+        left_delta_gripper = delta["left"]["gripper"]
 
-        right_delta_xyz = delta_action[10:13]
-        right_delta_rot6d = delta_action[13:19]
-        right_delta_gripper = delta_action[19]
+        right_delta_xyz = np.array(delta["right"]["xyz"], dtype=np.float32)
+        right_delta_R = np.array(delta["right"]["rotation"], dtype=np.float32)  # (3, 3)
+        right_delta_gripper = delta["right"]["gripper"]
 
-        # Update abs state: abs[t+1] = abs[t] + delta[t]
+        # Update abs state: xyz_new = xyz_current + delta_xyz
         self.left_xyz += left_delta_xyz
-        self.left_rot = self._apply_delta_rotation(self.left_rot, left_delta_rot6d)
-        self.left_gripper = np.clip(self.left_gripper + left_delta_gripper, 0.0, 1.0)
-
         self.right_xyz += right_delta_xyz
-        self.right_rot = self._apply_delta_rotation(self.right_rot, right_delta_rot6d)
-        self.right_gripper = np.clip(self.right_gripper + right_delta_gripper, 0.0, 1.0)
+
+        # Update rotation: R_new = R_current @ R_delta
+        R_left_current = Rotation.from_quat(self.left_quat).as_matrix()
+        R_left_new = R_left_current @ left_delta_R
+        self.left_quat = Rotation.from_matrix(R_left_new).as_quat().astype(np.float32)
+
+        R_right_current = Rotation.from_quat(self.right_quat).as_matrix()
+        R_right_new = R_right_current @ right_delta_R
+        self.right_quat = Rotation.from_matrix(R_right_new).as_quat().astype(np.float32)
+
+        # Update gripper (binary)
+        self.left_gripper = left_delta_gripper
+        self.right_gripper = right_delta_gripper
 
         # TODO: Send commands to real robot
         logger.debug(f"Executed delta: L_xyz={left_delta_xyz}, R_xyz={right_delta_xyz}")
-
-    def _rotation_to_rot6d(self, rot: Rotation) -> np.ndarray:
-        """Convert scipy Rotation to rot6d (first two columns of rotation matrix)."""
-        R = rot.as_matrix()  # (3, 3)
-        return np.concatenate([R[:, 0], R[:, 1]]).astype(np.float32)  # (6,)
-
-    def _apply_delta_rotation(self, current_rot: Rotation, delta_rot6d: np.ndarray) -> Rotation:
-        """
-        Apply delta rotation (SO(3) relative rotation).
-
-        R_new = R_current @ R_delta
-        """
-        # Convert delta_rot6d to rotation matrix
-        from starVLA_repo_placeholder import rot6d_to_matrix  # TODO: import from your codebase
-
-        R_delta = rot6d_to_matrix(delta_rot6d[None, :])[0]  # (3, 3)
-        R_current = current_rot.as_matrix()
-        R_new = R_current @ R_delta
-
-        return Rotation.from_matrix(R_new)
 
 
 # ==========================================
@@ -320,8 +330,8 @@ def main():
         for step in range(args.max_steps):
             t_start = time.time()
 
-            # Step 1: Get current robot state
-            left_pose, right_pose = robot.get_current_state()
+            # Step 1: Get current robot state (xyz in meters, quat [x,y,z,w])
+            left_xyz, left_quat, right_xyz, right_quat = robot.get_current_state()
 
             # Step 2: Capture images (resize at client to reduce transmission)
             left_img, right_img = robot.capture_images(tuple(args.image_size))
@@ -330,7 +340,9 @@ def main():
             if action_buffer is None or action_idx >= len(action_buffer):
                 logger.info(f"Step {step}: Requesting new action chunk from server")
                 action_buffer, inference_time = client.infer(
-                    left_img, right_img, left_pose, right_pose
+                    left_img, right_img,
+                    left_xyz, left_quat,
+                    right_xyz, right_quat,
                 )
                 action_idx = 0
 
@@ -341,7 +353,7 @@ def main():
 
             logger.info(
                 f"Step {step}: action_idx={action_idx}/{len(action_buffer)}, "
-                f"L_xyz={left_pose[:3]}, R_xyz={right_pose[:3]}"
+                f"L_xyz={left_xyz}, R_xyz={right_xyz}"
             )
 
             # Step 5: Sleep to maintain control frequency
