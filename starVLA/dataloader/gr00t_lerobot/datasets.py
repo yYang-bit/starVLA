@@ -67,6 +67,221 @@ EPSILON = 5e-4
 # LeRobot v3.0 dataset file names
 LE_ROBOT3_TASKS_FILENAME = "meta/tasks.parquet"
 LE_ROBOT3_EPISODE_FILENAME = "meta/episodes/*/*.parquet"
+LE_ROBOT3_DEFAULT_DATA_PATH = "data/chunk-{chunk_index:03d}/file-{file_index:03d}.parquet"
+LE_ROBOT3_DEFAULT_VIDEO_PATH = "videos/chunk-{chunk_index:03d}/{video_key}/file-{file_index:03d}.mp4"
+
+# LeRobot v2.1 dataset file names
+LE_ROBOT2_TASKS_FILENAME = "meta/tasks.jsonl"
+LE_ROBOT2_EPISODES_FILENAME = "meta/episodes.jsonl"
+LE_ROBOT2_DEFAULT_DATA_PATH = "data/chunk-{episode_chunk:03d}/episode_{episode_index:06d}.parquet"
+LE_ROBOT2_DEFAULT_VIDEO_PATH = "videos/chunk-{episode_chunk:03d}/{video_key}/episode_{episode_index:06d}.mp4"
+
+
+def _read_jsonl(path: Path) -> list[dict]:
+    """Read JSONL file (LeRobot v2.1 format)."""
+    rows = []
+    with open(path, "r") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            rows.append(json.loads(line))
+    return rows
+
+
+def _normalize_lerobot_version(version: str | None) -> str | None:
+    """Normalize LeRobot version string to v2.1 or v3.0.
+
+    Args:
+        version: Version string like "v2.1", "v3.0", "lerobot-v2.1", "2.1", "3.0", "auto", None
+
+    Returns:
+        "v2.1", "v3.0", or None for auto-detection
+    """
+    if version is None:
+        return None
+
+    normalized = str(version).strip().lower()
+
+    # Handle special values
+    if normalized in {"", "auto", "none", "null"}:
+        return None
+
+    # Remove common prefixes
+    normalized = normalized.removeprefix("lerobot-").removeprefix("lerobot_").removeprefix("v")
+
+    # Detect version
+    if normalized.startswith("2.1") or normalized.startswith("2_1"):
+        return "v2.1"
+    if normalized.startswith("3") or normalized.startswith("3.0") or normalized.startswith("3_0"):
+        return "v3.0"
+
+    raise ValueError(
+        f"Unsupported LeRobot version `{version}`. "
+        f"Expected v2.1, v3.0, or auto (None) for auto-detection."
+    )
+
+
+def _infer_feature_width(feature: dict, key: str) -> int:
+    """Infer the width/dimension of a feature from its metadata.
+
+    Args:
+        feature: Feature metadata dict from info.json
+        key: Feature key name (for error messages)
+
+    Returns:
+        Width as integer
+    """
+    shape = feature.get("shape", [])
+
+    # Handle scalar shape
+    if isinstance(shape, int):
+        return int(shape)
+
+    # Empty shape means scalar
+    if not shape:
+        return 1
+
+    # Expect 1D features for low-dimensional data
+    if len(shape) != 1:
+        raise ValueError(f"Expected low-dimensional feature {key} to be 1D, got shape={shape}")
+
+    return int(shape[0])
+
+
+def _fixed_rotation_6d_stats() -> dict:
+    """Return fixed statistics for rotation_6d.
+
+    rotation_6d is always in range [-1, 1] by construction,
+    so we can use fixed stats instead of computing from data.
+    """
+    return {
+        "mean": [0.0] * 6,
+        "std": [1.0] * 6,
+        "min": [-1.0] * 6,
+        "max": [-1.0] * 6,
+        "q01": [-1.0] * 6,
+        "q99": [1.0] * 6,
+    }
+
+
+def _load_lerobot_modality_metadata(
+    modality_meta_path: Path,
+    info_meta_path: Path | None = None,
+) -> LeRobotModalityMetadata:
+    """Load modality metadata from modality.json.
+
+    If info.json is provided, use it to fill in missing shape/dtype information.
+
+    Args:
+        modality_meta_path: Path to meta/modality.json
+        info_meta_path: Optional path to meta/info.json
+
+    Returns:
+        Validated LeRobotModalityMetadata
+    """
+    with open(modality_meta_path, "r") as f:
+        payload = json.load(f)
+
+    # Load features from info.json if available
+    features = {}
+    if info_meta_path is not None and info_meta_path.exists():
+        with open(info_meta_path, "r") as f:
+            features = json.load(f).get("features", {})
+
+    # Ensure action dict exists
+    if payload.get("action") is None:
+        payload["action"] = {}
+
+    # Fill in shape/dtype from info.json features
+    for modality in ("state", "action"):
+        for subkey, field_payload in payload.get(modality, {}).items():
+            if field_payload is None:
+                field_payload = {}
+                payload[modality][subkey] = field_payload
+
+            original_key = field_payload.get("original_key") or subkey
+            field_payload["original_key"] = original_key
+
+            if original_key not in features:
+                continue
+
+            feature = features[original_key]
+            field_payload["start"] = 0
+            field_payload["end"] = _infer_feature_width(feature, original_key)
+            field_payload["dtype"] = feature.get("dtype", field_payload.get("dtype", "float32"))
+
+    return LeRobotModalityMetadata.model_validate(payload)
+
+
+def _strip_modality_prefix(key: str, prefix: str) -> str:
+    """Strip modality prefix from key.
+
+    Example: _strip_modality_prefix("state.joint_pos", "state") -> "joint_pos"
+    """
+    return key.removeprefix(f"{prefix}.")
+
+
+def _build_direct_lerobot_modality_metadata(
+    modality_configs: dict,
+    info_meta: dict,
+) -> LeRobotModalityMetadata:
+    """Build modality metadata directly from info.json when modality.json is missing.
+
+    This is used for v2.1 datasets that don't have modality.json.
+
+    Args:
+        modality_configs: Dict of ModalityConfig for each modality
+        info_meta: Loaded info.json dict
+
+    Returns:
+        Constructed LeRobotModalityMetadata
+    """
+    features = info_meta.get("features", {})
+    payload: dict[str, dict] = {"state": {}, "action": {}, "video": {}, "annotation": {}}
+
+    # Build state and action metadata from modality_keys
+    for modality in ("state", "action"):
+        config = modality_configs.get(modality)
+        if config is None:
+            continue
+
+        for raw_key in config.modality_keys:
+            # Skip special keys
+            if raw_key in {"lapa_action", "dream_actions"} or raw_key not in features:
+                continue
+
+            feature = features[raw_key]
+            subkey = _strip_modality_prefix(raw_key, modality)
+
+            payload[modality][subkey] = {
+                "original_key": raw_key,
+                "start": 0,
+                "end": _infer_feature_width(feature, raw_key),
+                "dtype": feature.get("dtype", "float32"),
+            }
+
+    # Build video metadata
+    video_cfg = modality_configs.get("video")
+    if video_cfg is not None:
+        for key in video_cfg.modality_keys:
+            original_key = _strip_modality_prefix(key, "video")
+            payload["video"][original_key] = {"original_key": original_key}
+
+    # Build language/annotation metadata
+    language_cfg = modality_configs.get("language")
+    if language_cfg is not None:
+        for key in language_cfg.modality_keys:
+            subkey = _strip_modality_prefix(key, "annotation")
+            # Try to find the key in features
+            original_key = None
+            for candidate in (key, subkey, "task_index", "task", "language_instruction", "task_description"):
+                if candidate in features:
+                    original_key = candidate
+                    break
+            payload["annotation"][subkey] = {"original_key": original_key or "task_index"}
+
+    return LeRobotModalityMetadata.model_validate(payload)
 
 
 def calculate_dataset_statistics(parquet_paths: list[Path]) -> dict:
@@ -829,15 +1044,25 @@ class LeRobotSingleDataset(Dataset):
         self.data_cfg = data_cfg
         if not Path(dataset_path).exists():
             raise FileNotFoundError(f"Dataset path {dataset_path} does not exist")
-        # This loader only supports the LeRobot v3 dataset layout.
-        self._lerobot_version = "v3.0"
-        if self.data_cfg is not None:
-            configured_version = self.data_cfg.get("lerobot_version", "v3.0")
-            if configured_version not in (None, "v3.0"):
-                raise ValueError(
-                    f"Unsupported lerobot_version={configured_version}. "
-                    "starVLA/dataloader/gr00t_lerobot/datasets.py now only supports LeRobot v3.0."
+
+        # Detect LeRobot version (v2.1 or v3.0)
+        configured_version = self.data_cfg.get("lerobot_version", "auto") if self.data_cfg else "auto"
+        normalized_version = _normalize_lerobot_version(configured_version)
+
+        if normalized_version is None:
+            # Auto-detect version
+            dataset_path_obj = Path(dataset_path)
+            if (dataset_path_obj / LE_ROBOT2_EPISODES_FILENAME).exists():
+                self._lerobot_version = "v2.1"
+            elif list(dataset_path_obj.glob(LE_ROBOT3_EPISODE_FILENAME)):
+                self._lerobot_version = "v3.0"
+            else:
+                raise FileNotFoundError(
+                    f"Cannot detect LeRobot version from {dataset_path}. "
+                    f"Expected {LE_ROBOT2_EPISODES_FILENAME} (v2.1) or {LE_ROBOT3_EPISODE_FILENAME} (v3.0)"
                 )
+        else:
+            self._lerobot_version = normalized_version
 
         self._action_mode = None
         self._action_mode_state_map = {}
@@ -983,11 +1208,24 @@ class LeRobotSingleDataset(Dataset):
 
         # 1. Modality metadata
         modality_meta_path = self.dataset_path / LE_ROBOT_MODALITY_FILENAME
-        assert modality_meta_path.exists(), f"Please provide a {LE_ROBOT_MODALITY_FILENAME} file in {self.dataset_path}"
+        info_meta_path = self.dataset_path / LE_ROBOT_INFO_FILENAME
+
+        # Load modality metadata (from modality.json or build from info.json)
+        if modality_meta_path.exists():
+            le_modality_meta = _load_lerobot_modality_metadata(modality_meta_path, info_meta_path)
+        else:
+            # Build from info.json (v2.1 datasets)
+            if not info_meta_path.exists():
+                raise FileNotFoundError(
+                    f"Neither {modality_meta_path} nor {info_meta_path} exists. "
+                    f"At least one is required."
+                )
+            with open(info_meta_path, "r") as f:
+                info_meta = json.load(f)
+            le_modality_meta = _build_direct_lerobot_modality_metadata(self.modality_configs, info_meta)
+
         # 1.1. State and action modalities
         simplified_modality_meta: dict[str, dict] = {}
-        with open(modality_meta_path, "r") as f:
-            le_modality_meta = LeRobotModalityMetadata.model_validate(json.load(f))
         for modality in ["state", "action"]:
             simplified_modality_meta[modality] = {}
             le_state_action_meta: dict[str, LeRobotStateActionMetadata] = getattr(le_modality_meta, modality)
@@ -1186,34 +1424,65 @@ class LeRobotSingleDataset(Dataset):
         return metadata
 
     def _get_trajectories(self) -> tuple[np.ndarray, np.ndarray]:
-        """Get the trajectories in the dataset."""
-        file_paths = sorted(list(self.dataset_path.glob(LE_ROBOT3_EPISODE_FILENAME)))
+        """Get the trajectories in the dataset (supports v2.1 and v3.0)."""
         trajectory_ids = []
         trajectory_lengths = []
         self.trajectory_ids_to_metadata = {}
-        for file_path in file_paths:
-            episodes_data = pd.read_parquet(file_path)
-            timestamp_cols = [
-                c for c in episodes_data.columns if str(c).startswith("videos/") and str(c).endswith("/from_timestamp")
-            ]
-            for index, episode in episodes_data.iterrows():
-                trajectory_ids.append(episode["episode_index"])
-                trajectory_lengths.append(episode["length"])
 
-                from_timestamps = {}
-                for col in timestamp_cols:
-                    value = episode[col]
-                    if pd.isna(value):
-                        continue
-                    video_key = str(col)[len("videos/") : -len("/from_timestamp")]
-                    from_timestamps[video_key] = float(value)
+        if self._lerobot_version == "v2.1":
+            # LeRobot v2.1: episodes.jsonl format
+            episodes_path = self.dataset_path / LE_ROBOT2_EPISODES_FILENAME
+            episodes_list = _read_jsonl(episodes_path)
 
+            info_meta = self._get_lerobot_info_meta()
+            chunk_size = int(info_meta.get("chunks_size", info_meta.get("chunk_size", 1000)))
+
+            for episode in episodes_list:
+                episode_index = int(episode.get("episode_index", len(trajectory_ids)))
+                length = episode.get("length", episode.get("num_frames", episode.get("episode_length")))
+                if length is None:
+                    raise KeyError(
+                        f"Episode {episode_index} missing length/num_frames/episode_length in {episodes_path}"
+                    )
+
+                trajectory_ids.append(episode_index)
+                trajectory_lengths.append(int(length))
+
+                # Calculate chunk info for v2.1 (episode_chunk-based indexing)
+                episode_chunk = int(episode.get("episode_chunk", episode_index // chunk_size))
                 episode_meta = {
-                    "data/chunk_index": episode["data/chunk_index"],
-                    "data/file_index": episode["data/file_index"],
-                    "data/file_from_index": index,
-                    "videos/from_timestamps": from_timestamps,
+                    "episode_chunk": episode_chunk,
+                    "chunk_index": episode_chunk,
+                    "episode_index": episode_index,
                 }
+                self.trajectory_ids_to_metadata[episode_index] = episode_meta
+
+        elif self._lerobot_version == "v3.0":
+            # LeRobot v3.0: episodes/*/*.parquet format
+            file_paths = sorted(list(self.dataset_path.glob(LE_ROBOT3_EPISODE_FILENAME)))
+            for file_path in file_paths:
+                episodes_data = pd.read_parquet(file_path)
+                timestamp_cols = [
+                    c for c in episodes_data.columns if str(c).startswith("videos/") and str(c).endswith("/from_timestamp")
+                ]
+                for index, episode in episodes_data.iterrows():
+                    trajectory_ids.append(episode["episode_index"])
+                    trajectory_lengths.append(episode["length"])
+
+                    from_timestamps = {}
+                    for col in timestamp_cols:
+                        value = episode[col]
+                        if pd.isna(value):
+                            continue
+                        video_key = str(col)[len("videos/") : -len("/from_timestamp")]
+                        from_timestamps[video_key] = float(value)
+
+                    episode_meta = {
+                        "data/chunk_index": episode["data/chunk_index"],
+                        "data/file_index": episode["data/file_index"],
+                        "data/file_from_index": index,
+                        "videos/from_timestamps": from_timestamps,
+                    }
                 self.trajectory_ids_to_metadata[trajectory_ids[-1]] = episode_meta
 
         return np.array(trajectory_ids), np.array(trajectory_lengths)
@@ -1540,12 +1809,32 @@ class LeRobotSingleDataset(Dataset):
         return self.data_cfg.get("relative_trajectory", False) in [True, "True", "true"]
 
     def _get_lerobot_modality_meta(self) -> LeRobotModalityMetadata:
-        """Get the metadata for the LeRobot dataset."""
+        """Get the LeRobot modality metadata.
+
+        Supports two paths:
+        1. Load from meta/modality.json (v3.0 with structured metadata)
+        2. Build from meta/info.json (v2.1 without modality.json)
+        """
         modality_meta_path = self.dataset_path / LE_ROBOT_MODALITY_FILENAME
-        assert modality_meta_path.exists(), f"Please provide a {LE_ROBOT_MODALITY_FILENAME} file in {self.dataset_path}"
-        with open(modality_meta_path, "r") as f:
-            modality_meta = LeRobotModalityMetadata.model_validate(json.load(f))
-        return modality_meta
+        info_meta_path = self.dataset_path / LE_ROBOT_INFO_FILENAME
+
+        if modality_meta_path.exists():
+            # Path 1: Load existing modality.json (Galbot v3.0)
+            return _load_lerobot_modality_metadata(modality_meta_path, info_meta_path)
+        else:
+            # Path 2: Build from info.json (FastUMI v2.1)
+            # This requires modality_configs to know what keys to look for
+            if not info_meta_path.exists():
+                raise FileNotFoundError(
+                    f"Neither {modality_meta_path} nor {info_meta_path} exists. "
+                    f"At least one is required to load the dataset."
+                )
+
+            with open(info_meta_path, "r") as f:
+                info_meta = json.load(f)
+
+            # Build metadata from modality_configs
+            return _build_direct_lerobot_modality_metadata(self.modality_configs, info_meta)
 
     def _get_lerobot_info_meta(self) -> dict:
         """Get the metadata for the LeRobot dataset."""
@@ -1567,13 +1856,26 @@ class LeRobotSingleDataset(Dataset):
         return self.lerobot_info_meta["chunks_size"]
 
     def _get_tasks(self) -> pd.DataFrame:
-        """Get the tasks for the dataset."""
-        tasks_path = self.dataset_path / LE_ROBOT3_TASKS_FILENAME
-        df = pd.read_parquet(tasks_path)
-        df = df.reset_index()
-        df = df.rename(columns={"index": "task"})
-        df = df[["task_index", "task"]]
-        return df.set_index("task_index")
+        """Get the tasks for the dataset (supports v2.1 and v3.0)."""
+        if self._lerobot_version == "v2.1":
+            # LeRobot v2.1: tasks.jsonl format
+            tasks_path = self.dataset_path / LE_ROBOT2_TASKS_FILENAME
+            tasks_list = _read_jsonl(tasks_path)
+            # Convert to DataFrame
+            df = pd.DataFrame(tasks_list)
+            if "task_index" not in df.columns:
+                df["task_index"] = range(len(df))
+            df = df.rename(columns={"tasks": "task"}) if "tasks" in df.columns else df
+            df = df[["task_index", "task"]]
+            return df.set_index("task_index")
+        else:
+            # LeRobot v3.0: tasks.parquet format
+            tasks_path = self.dataset_path / LE_ROBOT3_TASKS_FILENAME
+            df = pd.read_parquet(tasks_path)
+            df = df.reset_index()
+            df = df.rename(columns={"index": "task"})
+            df = df[["task_index", "task"]]
+            return df.set_index("task_index")
 
     def _check_integrity(self):
         """Use the config to check if the keys are valid and detect silent data corruption."""
@@ -1714,13 +2016,24 @@ class LeRobotSingleDataset(Dataset):
             return self.curr_traj_data
         else:  # TODO check detail later
             episode_meta = self.trajectory_ids_to_metadata[trajectory_id]
-            chunk_index = episode_meta["data/chunk_index"]
-            file_index = self.get_episode_file_index(trajectory_id)
-            # file_from_index = self.get_episode_file_from_index(trajectory_id)
 
-            parquet_path = self.dataset_path / self.data_path_pattern.format(
-                chunk_index=chunk_index, file_index=file_index
-            )
+            # Build parquet path based on version
+            if self._lerobot_version == "v2.1":
+                # v2.1 uses episode_chunk and episode_index
+                episode_chunk = episode_meta["episode_chunk"]
+                parquet_path = self.dataset_path / self.data_path_pattern.format(
+                    episode_chunk=episode_chunk,
+                    episode_index=trajectory_id
+                )
+            else:
+                # v3.0 uses chunk_index and file_index
+                chunk_index = episode_meta["data/chunk_index"]
+                file_index = self.get_episode_file_index(trajectory_id)
+                parquet_path = self.dataset_path / self.data_path_pattern.format(
+                    chunk_index=chunk_index,
+                    file_index=file_index
+                )
+
             assert parquet_path.exists(), f"Parquet file not found at {parquet_path}"
             file_data = pd.read_parquet(parquet_path)
 
