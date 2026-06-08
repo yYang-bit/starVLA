@@ -59,136 +59,78 @@ class DerivedKeysTransform(ModalityTransform):
         state.left_gripper: [1D] (slice [6:7])
     """
 
-    def __init__(
-        self,
-        apply_to: list[str],
-        derived_keys: dict[str, dict[str, Any]],
-        drop_source_keys: bool = False,
-        **kwargs,
-    ):
-        """
-        Args:
-            apply_to: Output keys to produce
-            derived_keys: Derivation specifications
-                Format: {
-                    "output_key": {
-                        "type": "keep_from_origin" | "transform_from_origin",
-                        "source_key": "raw_key",
-                        "start": int,
-                        "end": int,
-                        "from": "rpy" | "quaternion" (for transform_from_origin),
-                        "to": "rotation_6d" (for transform_from_origin),
-                        "convention": "XYZ" (for RPY),
-                    }
-                }
-            drop_source_keys: Whether to remove source keys after derivation
-        """
-        super().__init__(apply_to=apply_to, **kwargs)
-        self.derived_keys = derived_keys
-        self.drop_source_keys = drop_source_keys
+    derived_keys: dict[str, dict[str, Any]] = Field(
+        ..., description="Mapping from output key to source slicing or representation transform spec."
+    )
+    drop_source_keys: bool = Field(default=False, description="Remove raw keys after all derived outputs are created.")
 
     def _slice_source(self, source: torch.Tensor | np.ndarray, start: int, end: int):
         """Slice a sub-vector from source."""
-        if isinstance(source, torch.Tensor):
-            return source[..., start:end]
         return source[..., start:end]
 
-    def _restore_type(self, data, was_tensor: bool, device, dtype):
-        """Restore original data type (tensor or numpy)."""
-        if was_tensor:
-            if not isinstance(data, torch.Tensor):
-                data = torch.from_numpy(data)
-            return data.to(device=device, dtype=dtype)
-        else:
-            if isinstance(data, torch.Tensor):
-                return data.detach().cpu().numpy()
-            return np.asarray(data)
-
     def _rotation_to_6d(self, value, spec: dict):
-        """Convert rotation to rotation_6d format.
-
-        Supports:
-        - RPY (Euler angles XYZ) → rotation_6d
-        - Quaternion → rotation_6d
-        """
+        """Convert rotation to rotation_6d format."""
         source_repr = str(spec.get("from", "")).lower()
 
         if not isinstance(value, torch.Tensor):
-            value = torch.from_numpy(value)
-
+            value = torch.from_numpy(np.asarray(value, dtype=np.float32))
         value = value.to(torch.float32)
 
-        # Convert to rotation matrix first
         if source_repr in {"rpy", "euler", "euler_angles", "euler_xyz"}:
-            # RPY: roll, pitch, yaw (XYZ convention)
-            if value.shape[-1] != 3:
-                raise ValueError(f"Expected RPY to have dim 3, got {tuple(value.shape)}")
-            # pytorch3d uses ZYX convention, so reverse the order
-            xyz = value.to(torch.float32)
-            matrix = pt.euler_angles_to_matrix(xyz, convention="XYZ")
+            matrix = pt.euler_angles_to_matrix(value, convention="XYZ")
         elif source_repr in {"quaternion", "quat"}:
-            if value.shape[-1] != 4:
-                raise ValueError(f"Expected quaternion to have dim 4, got {tuple(value.shape)}")
-            # pytorch3d expects [w, x, y, z]
-            matrix = pt.quaternion_to_matrix(value.to(torch.float32))
-        elif source_repr in {"rotation_matrix", "matrix"}:
-            matrix = value.to(torch.float32).reshape(*value.shape[:-1], 3, 3)
+            matrix = pt.quaternion_to_matrix(value)
         elif source_repr in {"rotation_6d", "rot6d"}:
-            # Already rotation_6d
-            return value.to(torch.float32)
+            return value
         else:
-            raise ValueError(f"Unsupported rotation source representation: {source_repr}")
+            raise ValueError(f"Unsupported rotation source: {source_repr}")
 
-        # Convert matrix to rotation_6d
         return pt.matrix_to_rotation_6d(matrix)
 
-    def forward(self, data: dict) -> dict:
+    def apply(self, data: dict[str, Any]) -> dict[str, Any]:
         """Apply derived keys transform."""
-        used_source_keys = set()
+        used_source_keys: set[str] = set()
 
-        for output_key in self.apply_to:
-            if output_key not in self.derived_keys:
-                continue
-
-            spec = self.derived_keys[output_key]
-            source_key = spec.get("source_key")
-
+        for output_key, spec in self.derived_keys.items():
+            source_key = str(spec.get("source_key", ""))
             if source_key not in data:
-                raise KeyError(f"Source key {source_key} not found in data for deriving {output_key}")
+                continue
 
             source = data[source_key]
             source_is_tensor = isinstance(source, torch.Tensor)
             source_device = source.device if source_is_tensor else None
             source_dtype = source.dtype if source_is_tensor else None
 
-            # Slice the source
-            start = int(spec.get("start", 0))
-            end = int(spec.get("end", -1))
-            source_slice = self._slice_source(source, start, end)
+            if not source_is_tensor:
+                source = torch.from_numpy(np.asarray(source, dtype=np.float32))
 
-            # Apply transformation based on type
+            source = source.to(torch.float32)
+            start = int(spec.get("start", 0))
+            end = int(spec.get("end", source.shape[-1]))
+            source_slice = source[..., start:end]
+
             spec_type = str(spec.get("type", "")).lower()
 
-            if spec_type in {"keep_from_origin", "keep_from_orign"}:  # Support typo
+            if spec_type in {"keep_from_origin", "keep_from_orign"}:
                 output = source_slice
-            elif spec_type in {"transform_from_origin", "transform_from_orign"}:  # Support typo
+            elif spec_type in {"transform_from_origin", "transform_from_orign"}:
                 output = self._rotation_to_6d(source_slice, spec)
             else:
                 raise ValueError(f"Unsupported derived key type for {output_key}: {spec.get('type')}")
 
-            data[output_key] = self._restore_type(output, source_is_tensor, source_device, source_dtype)
+            # Restore original type
+            if source_is_tensor:
+                data[output_key] = output.to(device=source_device, dtype=source_dtype)
+            else:
+                data[output_key] = output.detach().cpu().numpy().astype(np.float32)
+
             used_source_keys.add(source_key)
 
-        # Optionally remove source keys
         if self.drop_source_keys:
             for source_key in used_source_keys:
                 data.pop(source_key, None)
 
         return data
-
-    def apply(self, data: dict) -> dict:
-        """Apply method required by ModalityTransform base class."""
-        return self.forward(data)
 
 
 class FastUMIDualArmDataConfig:
