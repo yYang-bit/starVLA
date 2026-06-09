@@ -364,21 +364,6 @@ class FastUMIDualArmDataConfig:
             )
         ]
 
-    def relative_pose_transform(self):
-        """Relative pose action transform (action relative to current state)."""
-        return RelativePoseActionTransform(
-            apply_to=self.state_keys + self.action_keys,
-            state_keys=self.state_keys,
-            apply_to=self.action_keys,
-            arm_prefixes=["left", "right"],
-            state_position_suffix="_arm",
-            state_rotation_suffix="_ori_6d",
-            state_gripper_suffix="_gripper",
-            action_position_suffix="_arm",
-            action_rotation_suffix="_ori_6d",
-            action_gripper_suffix="_gripper",
-        )
-
     def transform(self, data_cfg=None):
         """Build complete transform pipeline.
 
