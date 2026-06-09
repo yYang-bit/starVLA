@@ -62,7 +62,7 @@ def build_dataloader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=chosen_collate_fn,
-            num_workers=8,
+            num_workers=2,  #每个worker预加载一个batch(per_device_batch_size)的数据，num_workers数量代表每个gpu预加载的batch数量
             # shuffle=True
         )
         if (dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized():

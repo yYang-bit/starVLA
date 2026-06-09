@@ -66,7 +66,7 @@ class ActionChunkTransform(ModalityTransform):
         ...,
         description="Transform mode: abs (no transform) | delta (frame-to-frame) | relative_pose (relative to base)"
     )
-    action_keys: list[str] = Field(
+    apply_to: list[str] = Field(
         ...,
         description="Action keys to transform (position, rotation, gripper)"
     )
@@ -273,7 +273,7 @@ class ActionChunkTransform(ModalityTransform):
             return data
 
         # Process each action key
-        for action_key in self.action_keys:
+        for action_key in self.apply_to:
             if action_key not in data:
                 continue
 

@@ -21,10 +21,20 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
-from examples.FastUMI.train_files.data_registry.data_config import (
-    FastUMIDualArmDataConfig,
-    ROBOT_TYPE_TO_EMBODIMENT_TAG,
-)
+from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
+from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
+from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionToTensor
+
+# Import FastUMI config via importlib (not as package)
+import importlib.util
+_config_path = Path(__file__).parent.parent / "examples/FastUMI/train_files/data_registry/data_config.py"
+_spec = importlib.util.spec_from_file_location("fastumi_data_config", _config_path)
+_fastumi_module = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(_fastumi_module)
+
+FastUMIDualArmDataConfig = _fastumi_module.FastUMIDualArmDataConfig
+DerivedKeysTransform = _fastumi_module.DerivedKeysTransform
+ROBOT_TYPE_TO_EMBODIMENT_TAG = _fastumi_module.ROBOT_TYPE_TO_EMBODIMENT_TAG
 
 
 def test_fastumi_dataloader():
@@ -57,12 +67,6 @@ def test_fastumi_dataloader():
     print(f"\n📊 Creating dataset for stats computation...")
     print(f"   (Using transform pipeline WITHOUT normalization)")
 
-    # Get transform without normalization
-    # We'll build a minimal transform for testing
-    from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform
-    from starVLA.dataloader.gr00t_lerobot.transform.state_action import StateActionToTensor
-    from examples.FastUMI.train_files.data_registry.data_config import DerivedKeysTransform
-
     test_transforms = ComposedModalityTransform(
         transforms=[
             StateActionToTensor(apply_to=config.raw_state_keys + config.raw_action_keys),
@@ -80,7 +84,10 @@ def test_fastumi_dataloader():
             modality_configs=config.modality_config(),
             embodiment_tag=embodiment_tag,
             transforms=test_transforms,
-            data_cfg={"lerobot_version": "auto"},
+            data_cfg={
+                "lerobot_version": "auto",
+                "stats_path": "/tmp/fastumi_dummy_stats.json",  # Use dummy stats for testing
+            },
         )
 
         print(f"✅ Dataset created successfully")

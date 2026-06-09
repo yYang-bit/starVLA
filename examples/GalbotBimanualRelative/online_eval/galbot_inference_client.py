@@ -10,13 +10,15 @@ Client 端职责:
   4. 发送数据给 server 端
   5. 接收物理单位的 delta_action (xyz 米 + 3x3 rotation matrix)
   6. 执行机器人控制：
-     - xyz_target = xyz_current + delta_xyz
+     - delta_xyz_world = R_current @ delta_xyz_local
+     - xyz_target = xyz_current + delta_xyz_world
      - R_target = R_current @ delta_rotation
      - quat_target = Rotation.from_matrix(R_target).as_quat()
 
 Units and Conventions:
   - xyz: meters (m)
   - rotation: quaternion [x, y, z, w] (scipy convention)
+  - delta xyz: EEF local frame, converted to world before publishing WBC targets
   - gripper: binary {0, 1}
 
 Communication Protocol:
@@ -25,11 +27,13 @@ Communication Protocol:
   - Response: delta_action list (xyz + 3x3 rotation matrix + gripper)
 
 Usage:
-  python galbot_inference_client.py \\
+  python galbot_client.py \\
       --server_url http://192.168.1.100:5000 \\
       --control_freq 10 \\
       --action_horizon 30
 """
+
+from __future__ import annotations
 
 # ==========================================
 # Configuration (modify these for your setup)
@@ -44,21 +48,115 @@ DEFAULT_JPEG_QUALITY = 85  # JPEG 压缩质量 (0-100)
 
 import argparse
 import base64
+import copy
+import importlib
+import importlib.util
 import io
 import json
 import logging
+import sys
+import threading
 import time
+import types
+import urllib.error
+import urllib.request
 from pathlib import Path
-from typing import Optional
 
 import cv2
 import numpy as np
-import requests
 from PIL import Image
 from scipy.spatial.transform import Rotation
 
+
+CURRENT_DIR = Path(__file__).resolve().parent
+UMI_CLIENT_ROOT = CURRENT_DIR.parent.parent
+sys.path.insert(0, str(UMI_CLIENT_ROOT))
+
+
+def _ensure_local_namespace_package(package_name: str, package_path: Path) -> None:
+    module = types.ModuleType(package_name)
+    module.__path__ = [str(package_path)]
+    sys.modules[package_name] = module
+
+
+def _install_image_process_shim_if_missing() -> None:
+    """Allow importing GalbotControl in envs without the compiled ImageProcess extension."""
+    if "tool.ImageProcess" in sys.modules:
+        return
+    try:
+        importlib.import_module("tool.ImageProcess")
+        return
+    except ModuleNotFoundError:
+        pass
+
+    shim = types.ModuleType("tool.ImageProcess")
+
+    class _ImageProcessShim:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def numpy2D_to_str(self, arr, prec: int = 5) -> str:
+            return str(np.asarray(arr))
+
+    shim.ImageProcess = _ImageProcessShim
+    sys.modules["tool.ImageProcess"] = shim
+
+
+def _load_local_args_class():
+    args_path = UMI_CLIENT_ROOT / "args.py"
+    spec = importlib.util.spec_from_file_location("starvla_robot_client_args", str(args_path))
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Cannot load local args.py from {args_path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sys.modules["args"] = module
+    return module.Args
+
+
+_ensure_local_namespace_package("tool", UMI_CLIENT_ROOT / "tool")
+_ensure_local_namespace_package("galbot_control", UMI_CLIENT_ROOT / "galbot_control")
+_ensure_local_namespace_package("model_agent", UMI_CLIENT_ROOT / "model_agent")
+_install_image_process_shim_if_missing()
+
+Args = _load_local_args_class()
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
 logger = logging.getLogger(__name__)
+
+
+def wait_for_robot_state_ready(galbot, shutdown_event: threading.Event, timeout_s: float) -> None:
+    deadline = time.time() + float(timeout_s)
+    while time.time() < deadline and not shutdown_event.is_set():
+        has_joint_sensor = galbot.galbot_interface._joint_sensor_vla is not None
+        pose_len = len(galbot.galbot_interface.pose_buffer)
+        tf_len = len(galbot.galbot_interface.T_buffer)
+        has_valid_tf = False
+        if tf_len >= 2:
+            transform_now = galbot.galbot_interface.T_buffer[1]
+            has_valid_tf = len(transform_now) >= 3 and all(len(pose) == 7 for pose in transform_now[:3])
+        has_left_image = galbot.galbot_interface._image_hand_left is not None
+        has_right_image = galbot.galbot_interface._image_hand_right is not None
+        if has_joint_sensor and pose_len >= 2 and has_valid_tf and has_left_image and has_right_image:
+            logger.info("Robot state is ready")
+            return
+        logger.info(
+            "Waiting for robot state: joint_sensor=%s pose_buffer=%d tf_buffer=%d valid_tf=%s left_img=%s right_img=%s",
+            has_joint_sensor,
+            pose_len,
+            tf_len,
+            has_valid_tf,
+            has_left_image,
+            has_right_image,
+        )
+        time.sleep(1.0)
+    raise RuntimeError(
+        "Robot state is not ready after waiting. "
+        f"joint_sensor={galbot.galbot_interface._joint_sensor_vla is not None}, "
+        f"pose_buffer={len(galbot.galbot_interface.pose_buffer)}, "
+        f"tf_buffer={len(galbot.galbot_interface.T_buffer)}, "
+        f"left_image={galbot.galbot_interface._image_hand_left is not None}, "
+        f"right_image={galbot.galbot_interface._image_hand_right is not None}"
+    )
 
 
 # ==========================================
@@ -85,16 +183,42 @@ class InferenceClient:
         self.timeout = timeout
         self.use_jpeg_compression = use_jpeg_compression
         self.jpeg_quality = jpeg_quality
-        self.session = requests.Session()  # 复用 TCP 连接，减少延迟
 
     def health_check(self) -> bool:
         """Check if server is alive."""
         try:
-            resp = self.session.get(f"{self.server_url}/health", timeout=self.timeout)
-            return resp.status_code == 200 and resp.json().get("status") == "ok"
+            result = self._get_json("/health")
+            return result.get("status") == "ok"
         except Exception as e:
             logger.error(f"Health check failed: {e}")
             return False
+
+    def _get_json(self, endpoint: str) -> dict:
+        request = urllib.request.Request(
+            f"{self.server_url}{endpoint}",
+            method="GET",
+            headers={"Accept": "application/json"},
+        )
+        with urllib.request.urlopen(request, timeout=self.timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def _post_json(self, endpoint: str, payload: dict) -> dict:
+        body = json.dumps(payload).encode("utf-8")
+        request = urllib.request.Request(
+            f"{self.server_url}{endpoint}",
+            data=body,
+            method="POST",
+            headers={
+                "Content-Type": "application/json",
+                "Accept": "application/json",
+            },
+        )
+        try:
+            with urllib.request.urlopen(request, timeout=self.timeout) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            error_body = exc.read().decode("utf-8", errors="replace")
+            raise RuntimeError(f"Server returned {exc.code}: {error_body}") from exc
 
     def encode_image(self, img: np.ndarray) -> str:
         """
@@ -173,17 +297,9 @@ class InferenceClient:
 
         # Send POST request
         t0 = time.time()
-        resp = self.session.post(
-            f"{self.server_url}/infer",
-            json=payload,
-            timeout=self.timeout,
-        )
+        result = self._post_json("/infer", payload)
         roundtrip_ms = (time.time() - t0) * 1000
 
-        if resp.status_code != 200:
-            raise RuntimeError(f"Server returned {resp.status_code}: {resp.text}")
-
-        result = resp.json()
         delta_action = result["delta_action"]
         inference_time_ms = result["inference_time_ms"]
 
@@ -195,20 +311,34 @@ class InferenceClient:
 
 
 # ==========================================
-# Robot Interface (Mock - replace with real control)
+# Robot Interface
 # ==========================================
-class MockRobotInterface:
-    """Mock robot interface for demonstration. Replace with your actual robot API."""
+class GalbotRobotInterface:
+    """Robot interface backed by GalbotControl and the WBC EEF task interface."""
 
-    def __init__(self):
-        # Dummy state: 双臂 abs eef pose (xyz in meters, quat [x,y,z,w])
-        self.left_xyz = np.array([0.3, 0.0, 0.2], dtype=np.float32)  # meters
-        self.left_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # identity
-        self.left_gripper = 0.0  # 0=closed, 1=open
+    def __init__(
+        self,
+        image_size: tuple[int, int],
+        startup_sleep: float,
+        state_timeout: float,
+        gripper_closed: float,
+        gripper_open: float,
+    ):
+        self.image_size = tuple(image_size)
+        self.gripper_closed = float(gripper_closed)
+        self.gripper_open = float(gripper_open)
+        self.shutdown_event = threading.Event()
+        self.args = Args()
+        from galbot_control.galbot_control import GalbotControl
 
-        self.right_xyz = np.array([-0.3, 0.0, 0.2], dtype=np.float32)  # meters
-        self.right_quat = np.array([0.0, 0.0, 0.0, 1.0], dtype=np.float32)  # identity
-        self.right_gripper = 0.0
+        self.galbot = GalbotControl(copy.deepcopy(self.args))
+        self.left_target_xyz: np.ndarray | None = None
+        self.left_target_quat: np.ndarray | None = None
+        self.right_target_xyz: np.ndarray | None = None
+        self.right_target_quat: np.ndarray | None = None
+
+        time.sleep(float(startup_sleep))
+        wait_for_robot_state_ready(self.galbot, self.shutdown_event, state_timeout)
 
     def get_current_state(self) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
         """
@@ -220,7 +350,15 @@ class MockRobotInterface:
             right_xyz: [3] meters
             right_quat: [4] quaternion [x, y, z, w]
         """
-        return self.left_xyz, self.left_quat, self.right_xyz, self.right_quat
+        transform_now = self.galbot.galbot_interface.T_buffer[1]
+        left_pose7d = np.asarray(transform_now[0], dtype=np.float32).reshape(7)
+        right_pose7d = np.asarray(transform_now[1], dtype=np.float32).reshape(7)
+        return (
+            left_pose7d[:3].copy(),
+            left_pose7d[3:7].copy(),
+            right_pose7d[:3].copy(),
+            right_pose7d[3:7].copy(),
+        )
 
     def capture_images(self, image_size: tuple[int, int]) -> tuple[np.ndarray, np.ndarray]:
         """
@@ -233,18 +371,23 @@ class MockRobotInterface:
             left_img: [H, W, 3] uint8 RGB
             right_img: [H, W, 3] uint8 RGB
         """
-        # TODO: Replace with real camera capture
-        # Example using OpenCV:
-        #   left_cap = cv2.VideoCapture(0)
-        #   ret, left_frame = left_cap.read()
-        #   left_img = cv2.cvtColor(left_frame, cv2.COLOR_BGR2RGB)
-        #   left_img = cv2.resize(left_img, (image_size[1], image_size[0]))
+        return (
+            self._get_wrist_image_rgb("hand_left", image_size),
+            self._get_wrist_image_rgb("hand_right", image_size),
+        )
 
-        # Mock: generate random images
-        left_img = np.random.randint(0, 255, (*image_size, 3), dtype=np.uint8)
-        right_img = np.random.randint(0, 255, (*image_size, 3), dtype=np.uint8)
-
-        return left_img, right_img
+    def reset_action_anchor(
+        self,
+        left_xyz: np.ndarray,
+        left_quat: np.ndarray,
+        right_xyz: np.ndarray,
+        right_quat: np.ndarray,
+    ) -> None:
+        """Start a new action chunk from the robot state used for inference."""
+        self.left_target_xyz = np.asarray(left_xyz, dtype=np.float64).reshape(3).copy()
+        self.left_target_quat = np.asarray(left_quat, dtype=np.float64).reshape(4).copy()
+        self.right_target_xyz = np.asarray(right_xyz, dtype=np.float64).reshape(3).copy()
+        self.right_target_quat = np.asarray(right_quat, dtype=np.float64).reshape(4).copy()
 
     def execute_delta_action(self, delta: dict):
         """
@@ -257,7 +400,10 @@ class MockRobotInterface:
                   "right": {"xyz": [3], "rotation": [[3,3]], "gripper": float}
                 }
         """
-        # Parse delta
+        if self.left_target_xyz is None or self.left_target_quat is None:
+            left_xyz, left_quat, right_xyz, right_quat = self.get_current_state()
+            self.reset_action_anchor(left_xyz, left_quat, right_xyz, right_quat)
+
         left_delta_xyz = np.array(delta["left"]["xyz"], dtype=np.float32)
         left_delta_R = np.array(delta["left"]["rotation"], dtype=np.float32)  # (3, 3)
         left_delta_gripper = delta["left"]["gripper"]
@@ -266,25 +412,67 @@ class MockRobotInterface:
         right_delta_R = np.array(delta["right"]["rotation"], dtype=np.float32)  # (3, 3)
         right_delta_gripper = delta["right"]["gripper"]
 
-        # Update abs state: xyz_new = xyz_current + delta_xyz
-        self.left_xyz += left_delta_xyz
-        self.right_xyz += right_delta_xyz
-
-        # Update rotation: R_new = R_current @ R_delta
-        R_left_current = Rotation.from_quat(self.left_quat).as_matrix()
+        R_left_current = Rotation.from_quat(self.left_target_quat).as_matrix()
+        self.left_target_xyz = self.left_target_xyz + R_left_current @ left_delta_xyz.astype(np.float64)
         R_left_new = R_left_current @ left_delta_R
-        self.left_quat = Rotation.from_matrix(R_left_new).as_quat().astype(np.float32)
+        self.left_target_quat = Rotation.from_matrix(R_left_new).as_quat().astype(np.float64)
 
-        R_right_current = Rotation.from_quat(self.right_quat).as_matrix()
+        R_right_current = Rotation.from_quat(self.right_target_quat).as_matrix()
+        self.right_target_xyz = self.right_target_xyz + R_right_current @ right_delta_xyz.astype(np.float64)
         R_right_new = R_right_current @ right_delta_R
-        self.right_quat = Rotation.from_matrix(R_right_new).as_quat().astype(np.float32)
+        self.right_target_quat = Rotation.from_matrix(R_right_new).as_quat().astype(np.float64)
 
-        # Update gripper (binary)
-        self.left_gripper = left_delta_gripper
-        self.right_gripper = right_delta_gripper
+        head_pose = np.asarray(self.galbot.galbot_interface.T_buffer[1][2], dtype=np.float64).reshape(7)
+        self.galbot.galbot_interface.pub_task_pose(
+            [
+                "left_arm_end_effector_mount_link",
+                "right_arm_end_effector_mount_link",
+                "head_base_link",
+            ],
+            [self.left_target_xyz, self.right_target_xyz, head_pose[:3]],
+            [self.left_target_quat, self.right_target_quat, head_pose[3:7]],
+        )
+        self.galbot.galbot_interface.pub_gripper_command(
+            "left_gripper",
+            self._binary_gripper_to_command(left_delta_gripper),
+            100,
+        )
+        self.galbot.galbot_interface.pub_gripper_command(
+            "right_gripper",
+            self._binary_gripper_to_command(right_delta_gripper),
+            100,
+        )
 
-        # TODO: Send commands to real robot
-        logger.debug(f"Executed delta: L_xyz={left_delta_xyz}, R_xyz={right_delta_xyz}")
+        logger.debug(
+            "Executed target: L_xyz=%s R_xyz=%s",
+            np.array2string(self.left_target_xyz, precision=4, suppress_small=True),
+            np.array2string(self.right_target_xyz, precision=4, suppress_small=True),
+        )
+
+    def shutdown(self) -> None:
+        self.shutdown_event.set()
+        try:
+            self.galbot.galbot_interface.clear_task_pose()
+        except Exception:
+            pass
+        try:
+            self.galbot.shutdown()
+        except Exception:
+            pass
+
+    def _binary_gripper_to_command(self, value: float) -> float:
+        return self.gripper_open if float(value) >= 0.5 else self.gripper_closed
+
+    def _get_wrist_image_rgb(self, target: str, image_size: tuple[int, int]) -> np.ndarray:
+        image_bytes, error = self.galbot.galbot_interface.get_image(target)
+        if image_bytes is None:
+            raise RuntimeError(error or f"{target} image is None")
+        arr = np.frombuffer(image_bytes, np.uint8)
+        image_bgr = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+        if image_bgr is None:
+            raise RuntimeError(f"Failed to decode {target} image")
+        image_rgb = cv2.cvtColor(image_bgr, cv2.COLOR_BGR2RGB)
+        return cv2.resize(image_rgb, (int(image_size[1]), int(image_size[0])))
 
 
 # ==========================================
@@ -299,12 +487,17 @@ def main():
     parser.add_argument("--jpeg_quality", type=int, default=DEFAULT_JPEG_QUALITY, help="JPEG compression quality")
     parser.add_argument("--no_jpeg", action="store_true", help="Disable JPEG compression (use PNG)")
     parser.add_argument("--max_steps", type=int, default=100, help="Maximum control steps (for testing)")
+    parser.add_argument("--timeout", type=float, default=30.0, help="HTTP timeout in seconds")
+    parser.add_argument("--startup_sleep", type=float, default=3.0, help="Sleep before waiting for robot state")
+    parser.add_argument("--state_timeout", type=float, default=180.0, help="Timeout for robot state readiness")
+    parser.add_argument("--gripper_closed", type=float, default=50.0, help="Robot gripper command for binary 0")
+    parser.add_argument("--gripper_open", type=float, default=120.0, help="Robot gripper command for binary 1")
     args = parser.parse_args()
 
     # Initialize client
     client = InferenceClient(
         server_url=args.server_url,
-        timeout=5.0,
+        timeout=args.timeout,
         use_jpeg_compression=not args.no_jpeg,
         jpeg_quality=args.jpeg_quality,
     )
@@ -316,8 +509,13 @@ def main():
 
     logger.info(f"Connected to server: {args.server_url}")
 
-    # Initialize robot interface
-    robot = MockRobotInterface()
+    robot = GalbotRobotInterface(
+        image_size=tuple(args.image_size),
+        startup_sleep=args.startup_sleep,
+        state_timeout=args.state_timeout,
+        gripper_closed=args.gripper_closed,
+        gripper_open=args.gripper_open,
+    )
 
     # Control loop parameters
     dt = 1.0 / args.control_freq
@@ -344,6 +542,7 @@ def main():
                     left_xyz, left_quat,
                     right_xyz, right_quat,
                 )
+                robot.reset_action_anchor(left_xyz, left_quat, right_xyz, right_quat)
                 action_idx = 0
 
             # Step 4: Execute one step from action buffer
@@ -368,6 +567,8 @@ def main():
         logger.info("Control loop interrupted by user")
     except Exception as e:
         logger.exception(f"Error in control loop: {e}")
+    finally:
+        robot.shutdown()
 
     logger.info("Control loop finished")
 

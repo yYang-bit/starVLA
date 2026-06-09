@@ -369,7 +369,7 @@ class FastUMIDualArmDataConfig:
         return RelativePoseActionTransform(
             apply_to=self.state_keys + self.action_keys,
             state_keys=self.state_keys,
-            action_keys=self.action_keys,
+            apply_to=self.action_keys,
             arm_prefixes=["left", "right"],
             state_position_suffix="_arm",
             state_rotation_suffix="_ori_6d",
@@ -425,7 +425,7 @@ class FastUMIDualArmDataConfig:
             transforms.append(
                 ActionChunkTransform(
                     mode=action_mode,
-                    action_keys=self.action_keys,
+                    apply_to=self.action_keys,
                     position_suffix="_arm",
                     rotation_suffix="_ori_6d",
                     gripper_suffix="_gripper",
@@ -467,7 +467,7 @@ class FastUMIDualArmDataConfig:
             transforms.append(
                 ActionChunkTransform(
                     mode=action_mode,
-                    action_keys=self.action_keys,
+                    apply_to=self.action_keys,
                     position_suffix="_arm",
                     rotation_suffix="_ori_6d",
                     gripper_suffix="_gripper",

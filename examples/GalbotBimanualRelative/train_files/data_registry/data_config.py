@@ -161,7 +161,7 @@ class GalbotBimanualSelfDataConfig:
             transforms.append(
                 ActionChunkTransform(
                     mode=action_mode,
-                    action_keys=self.action_keys,
+                    apply_to=self.action_keys,
                     position_suffix="_pos",
                     rotation_suffix="_ori_6d",
                     gripper_suffix="_gripper",
@@ -208,7 +208,7 @@ class GalbotBimanualSelfDataConfig:
             transforms.append(
                 ActionChunkTransform(
                     mode=action_mode,
-                    action_keys=self.action_keys,
+                    apply_to=self.action_keys,
                     position_suffix="_pos",
                     rotation_suffix="_ori_6d",
                     gripper_suffix="_gripper",
