@@ -1,10 +1,21 @@
-"""FastUMI dual-arm dataset configuration with derived keys transform.
+"""FastUMI dual-arm dataset configuration with unified action chunk transform.
 
 This config demonstrates:
 1. Flat vector format (observation.state: [14D], action: [14D])
 2. DerivedKeysTransform to split vectors into structured keys
 3. RPY → rotation_6d conversion
-4. RelativePoseActionTransform for actions relative to current state
+4. ActionChunkTransform for embodiment-agnostic action representation
+
+Action transform modes (controlled by data_cfg.action_mode):
+    "abs"             : Absolute pose in world frame (no transform)
+    "delta"           : Frame-to-frame delta in local end-effector frame
+    "relative_pose"   : Relative to base (action[0]) in local frame
+
+Configuration (all optional, defaults shown):
+    action_mode: "abs"                     # Transform mode
+    action_chunk_size: 16                  # Action chunk horizon (sampled at 2-step interval)
+    gripper_normalization: None            # None (use raw values) | "binary" | "min_max"
+    gripper_binary_threshold: 0.5          # Threshold for binary mode
 """
 
 from typing import Any
@@ -17,8 +28,10 @@ from pydantic import Field
 from starVLA.dataloader.gr00t_lerobot.datasets import ModalityConfig
 from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 from starVLA.dataloader.gr00t_lerobot.transform.base import ComposedModalityTransform, ModalityTransform
+from starVLA.dataloader.gr00t_lerobot.transform.action_chunk_mode import (
+    ActionChunkTransform,
+)
 from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
-    RelativePoseActionTransform,
     StateActionToTensor,
     StateActionTransform,
 )
@@ -142,9 +155,15 @@ class FastUMIDualArmDataConfig:
 
     Transform pipeline:
     1. DerivedKeysTransform: Split flat vectors into structured keys + RPY→rot6d
-    2. (Optional) RelativePoseActionTransform: Compute relative actions
+    2. ActionChunkTransform: Transform to local frame (delta or relative_pose)
     3. StateActionTransform: Normalize
     """
+
+    # Default configuration
+    default_action_mode = "abs"
+    default_action_chunk_size = 16  # 16 actions sampled at 2-step interval
+    default_gripper_normalization = None
+    default_gripper_binary_threshold = 0.5
 
     video_keys = [
         "video.observation.images.left_camera_rgb_image",
@@ -176,10 +195,10 @@ class FastUMIDualArmDataConfig:
 
     language_keys = ["annotation.human.action.task_description"]
 
-    # Sampling indices
+    # Sampling indices (fixed for observation/state, dynamic for action)
     observation_indices = [0]
-    action_indices = list(range(0, 32, 2))  # 16 actions @ 2-step interval
     state_indices = [0]
+    # action_indices is dynamic (generated in modality_config)
 
     # Derivation rules for DerivedKeysTransform
     derived_keys = {
@@ -271,12 +290,12 @@ class FastUMIDualArmDataConfig:
         },
     }
 
-    # Normalization modes
-    normalization_modes = {
+    # Normalization modes (default, gripper can be overridden)
+    default_normalization_modes = {
         "action.left_arm": "q99",
-        "action.left_gripper": "min_max",
         "action.right_arm": "q99",
-        "action.right_gripper": "min_max",
+        "state.left_arm": "q99",
+        "state.right_arm": "q99",
     }
 
     def _derived_keys_for(self, modality: str) -> dict[str, dict[str, Any]]:
@@ -284,8 +303,24 @@ class FastUMIDualArmDataConfig:
         prefix = f"{modality}."
         return {key: value for key, value in self.derived_keys.items() if key.startswith(prefix)}
 
-    def modality_config(self):
-        """Return modality configurations."""
+    def modality_config(self, data_cfg=None):
+        """Return modality configurations with dynamic action_chunk_size.
+
+        Args:
+            data_cfg: Optional config dict with:
+                - action_chunk_size: int (default: 16)
+        """
+        cfg = data_cfg or {}
+
+        # Get action chunk size
+        action_chunk_size = int(cfg.get(
+            "action_chunk_size",
+            self.default_action_chunk_size
+        ))
+
+        # Generate action indices (2-step interval)
+        action_indices = list(range(0, action_chunk_size * 2, 2))
+
         return {
             "video": ModalityConfig(
                 delta_indices=self.observation_indices,
@@ -298,9 +333,9 @@ class FastUMIDualArmDataConfig:
                 derived_keys=self._derived_keys_for("state"),
             ),
             "action": ModalityConfig(
-                delta_indices=self.action_indices,
-                modality_keys=self.raw_action_keys,     # Raw: action
-                output_keys=self.action_keys,            # Derived: action.left_arm, etc.
+                delta_indices=action_indices,               # Dynamic
+                modality_keys=self.raw_action_keys,         # Raw: action
+                output_keys=self.action_keys,               # Derived: action.left_arm, etc.
                 derived_keys=self._derived_keys_for("action"),
             ),
             "language": ModalityConfig(
@@ -347,39 +382,121 @@ class FastUMIDualArmDataConfig:
     def transform(self, data_cfg=None):
         """Build complete transform pipeline.
 
-        Supports two modes:
-        1. relative_pose: Actions relative to current state (needs RelativePoseActionTransform)
-        2. absolute: Absolute actions (default)
+        Args:
+            data_cfg: Optional config dict with:
+                - action_mode: str (default: "abs")
+                - gripper_normalization: str or None (default: None)
+                - gripper_binary_threshold: float (default: 0.5)
         """
-        action_repr = str((data_cfg or {}).get("action_chunk_representation", "")).lower()
+        cfg = data_cfg or {}
 
-        if action_repr == "relative_pose":
-            return ComposedModalityTransform(
-                transforms=self.video_transforms()
-                + self.pose_transforms()
-                + [
-                    self.relative_pose_transform(),
-                    StateActionToTensor(apply_to=self.action_keys),
-                    StateActionTransform(
-                        apply_to=self.action_keys,
-                        normalization_modes=self.normalization_modes,
-                    ),
-                ]
+        # Read configuration
+        action_mode = str(cfg.get("action_mode", self.default_action_mode)).lower()
+        if action_mode not in {"abs", "delta", "relative_pose"}:
+            raise ValueError(f"action_mode must be 'abs'|'delta'|'relative_pose', got {action_mode!r}")
+
+        gripper_norm = cfg.get("gripper_normalization", self.default_gripper_normalization)
+        if gripper_norm is not None:
+            gripper_norm = str(gripper_norm).lower()
+            if gripper_norm not in {"binary", "min_max"}:
+                raise ValueError(f"gripper_normalization must be None|'binary'|'min_max', got {gripper_norm!r}")
+
+        gripper_binary_threshold = float(cfg.get("gripper_binary_threshold", self.default_gripper_binary_threshold))
+
+        # Build normalization modes
+        normalization_modes = self.default_normalization_modes.copy()
+
+        # Add gripper normalization if specified
+        if gripper_norm is not None:
+            normalization_modes["action.left_gripper"] = gripper_norm
+            normalization_modes["action.right_gripper"] = gripper_norm
+            normalization_modes["state.left_gripper"] = gripper_norm
+            normalization_modes["state.right_gripper"] = gripper_norm
+
+        # Build transform pipeline
+        state_action_keys = self.state_keys + self.action_keys
+
+        transforms = self.video_transforms() + self.pose_transforms() + [
+            StateActionToTensor(apply_to=state_action_keys),
+        ]
+
+        # Add action chunk transform (if not abs)
+        if action_mode != "abs":
+            transforms.append(
+                ActionChunkTransform(
+                    mode=action_mode,
+                    action_keys=self.action_keys,
+                    position_suffix="_arm",
+                    rotation_suffix="_ori_6d",
+                    gripper_suffix="_gripper",
+                )
             )
 
-        # Default: absolute mode
-        state_action_keys = self.state_keys + self.action_keys
-        return ComposedModalityTransform(
-            transforms=self.video_transforms()
-            + self.pose_transforms()
-            + [
-                StateActionToTensor(apply_to=state_action_keys),
-                StateActionTransform(
-                    apply_to=state_action_keys,
-                    normalization_modes=self.normalization_modes,
-                ),
-            ]
+        # Add normalization
+        transforms.append(
+            StateActionTransform(
+                apply_to=state_action_keys,
+                normalization_modes=normalization_modes,
+                binary_threshold=gripper_binary_threshold,
+            )
         )
+
+        return ComposedModalityTransform(transforms=transforms)
+
+    def transform_for_stats(self, data_cfg=None):
+        """Build transform pipeline for stats computation (no normalization).
+
+        Args:
+            data_cfg: Optional config dict (same as transform())
+        """
+        cfg = data_cfg or {}
+
+        action_mode = str(cfg.get("action_mode", self.default_action_mode)).lower()
+        if action_mode not in {"abs", "delta", "relative_pose"}:
+            raise ValueError(f"action_mode must be 'abs'|'delta'|'relative_pose', got {action_mode!r}")
+
+        # Build transform pipeline (NO normalization)
+        state_action_keys = self.state_keys + self.action_keys
+
+        transforms = self.video_transforms() + self.pose_transforms() + [
+            StateActionToTensor(apply_to=state_action_keys),
+        ]
+
+        # Add action chunk transform (if not abs)
+        if action_mode != "abs":
+            transforms.append(
+                ActionChunkTransform(
+                    mode=action_mode,
+                    action_keys=self.action_keys,
+                    position_suffix="_arm",
+                    rotation_suffix="_ori_6d",
+                    gripper_suffix="_gripper",
+                )
+            )
+
+        # NO StateActionTransform here!
+
+        return ComposedModalityTransform(transforms=transforms)
+
+    def stats_path(self, data_cfg=None):
+        """Get stats file path based on configuration.
+
+        Args:
+            data_cfg: Optional config dict with:
+                - action_mode: str
+                - action_chunk_size: int
+
+        Returns:
+            str: Relative path to stats file
+        """
+        cfg = data_cfg or {}
+
+        action_mode = str(cfg.get("action_mode", self.default_action_mode)).lower()
+        action_chunk_size = int(cfg.get("action_chunk_size", self.default_action_chunk_size))
+
+        # Stats file naming convention
+        return f"meta/stats_{action_mode}_chunk{action_chunk_size}.json"
+
 
 
 # Export registry
