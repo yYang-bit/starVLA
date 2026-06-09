@@ -71,6 +71,7 @@ def test_action_chunk_transform():
             dataset = LeRobotSingleDataset(
                 dataset_path=dataset_path,
                 modality_configs=config.modality_config(data_cfg),
+                embodiment_tag="fastumi_test",  # Dummy tag for testing
                 transforms=config.transform_for_stats(data_cfg),  # No normalization
             )
         except Exception as e:
