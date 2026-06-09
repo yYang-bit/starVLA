@@ -44,7 +44,7 @@ import numpy as np
 from pydantic import Field, model_validator
 
 from .base import ModalityTransform
-from .rotation_utils import rot6d_to_matrix, matrix_to_rotation_6d
+from .rotation_utils import rot6d_to_matrix, matrix_to_rot6d
 
 
 class ActionChunkTransform(ModalityTransform):
@@ -222,7 +222,7 @@ class ActionChunkTransform(ModalityTransform):
         )
 
         # Convert back to rotation_6d
-        return matrix_to_rotation_6d(delta_mat)
+        return matrix_to_rot6d(delta_mat)
 
     def _relative_rotation(
         self,
@@ -253,7 +253,7 @@ class ActionChunkTransform(ModalityTransform):
         rel_mat = torch.einsum("ij,tjk->tik", base_rot_inv, rot_mat)
 
         # Convert back to rotation_6d
-        return matrix_to_rotation_6d(rel_mat)
+        return matrix_to_rot6d(rel_mat)
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
         """
