@@ -22,6 +22,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
+from starVLA.dataloader.gr00t_lerobot.embodiment_tags import EmbodimentTag
 
 # Import FastUMI config
 import importlib.util
@@ -71,7 +72,7 @@ def test_action_chunk_transform():
             dataset = LeRobotSingleDataset(
                 dataset_path=dataset_path,
                 modality_configs=config.modality_config(data_cfg),
-                embodiment_tag="fastumi_test",  # Dummy tag for testing
+                embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,  # Use generic tag
                 transforms=config.transform_for_stats(data_cfg),  # No normalization
             )
         except Exception as e:
