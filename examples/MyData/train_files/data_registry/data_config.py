@@ -15,8 +15,7 @@ from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
 )
 from starVLA.dataloader.gr00t_lerobot.transform.video import (
     VideoColorJitter,
-    VideoCrop,
-    VideoResize,
+    VideoResizeWithPad,
     VideoToNumpy,
     VideoToTensor,
 )
@@ -265,8 +264,7 @@ class MyDataConfig:
     def video_transforms(self):
         return [
             VideoToTensor(apply_to=self.video_keys),
-            VideoCrop(apply_to=self.video_keys, scale=0.95),
-            VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
+            VideoResizeWithPad(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
             VideoColorJitter(apply_to=self.video_keys, brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
             VideoToNumpy(apply_to=self.video_keys),
         ]
@@ -333,7 +331,7 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 DATASET_NAMED_MIXTURES = {
-    "my_mix": [
+    "mymy_mix": [
         ("unknown", 1.0, "my_robot"),
     ],
 }

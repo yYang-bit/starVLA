@@ -36,6 +36,7 @@ from .video import (
     VideoRandomPosterize,
     VideoRandomRotation,
     VideoResize,
+    VideoResizeWithPad,
     VideoToNumpy,
     VideoToTensor,
     VideoTransform,

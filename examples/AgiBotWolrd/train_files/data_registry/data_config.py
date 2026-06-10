@@ -36,12 +36,6 @@ FASTUMI_DUAL_ARM_TASKS = [
     "Place_Pot_on_Induction_Cooktop",
     "Place_Shoes_and_Close_Shoe_Cabinet",
     "Pour_Water_into_Teacup",
-    "Put_Books_into_Schoolbag",
-    "Put_Clothes_into_Laundry_Hamper",
-    "Put_Food_into_Electric_Oven",
-    "Put_Food_into_Microwave",
-    "Take_Bottle_and_Close_Double_Doors",
-    "Take_Bottle_and_Place_on_Coaster",
 ]
 
 
@@ -148,10 +142,10 @@ class DerivedKeysTransform(ModalityTransform):
         return data
 
 
-class FastUMIDualArmDataConfig:
+class AgiBotWolrdDataConfig:
     video_keys = [
-        "video.observation.images.left_camera_rgb_image",
-        "video.observation.images.right_camera_rgb_image",
+        "video.observation.images.hand_right",
+        "video.observation.images.hand_left"
     ]
     raw_state_keys = ["observation.state"]
     raw_action_keys = ["action"]
@@ -178,50 +172,50 @@ class FastUMIDualArmDataConfig:
     state_indices = [0]
 
     derived_keys = {
-        "state.left_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 0, "end": 3},
+        "state.left_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 34, "end": 37},
         "state.left_ori_6d": {
             "type": "transform_from_origin",
             "source_key": "observation.state",
-            "start": 3,
-            "end": 6,
-            "from": "rpy",
+            "start": 26,
+            "end": 30,
+            "from": "quaternion",
             "to": "rotation_6d",
-            "convention": "XYZ",
+            "quaternion_order": "xyzw",
         },
-        "state.left_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 6, "end": 7},
-        "state.right_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 7, "end": 10},
+        "state.left_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 0, "end": 1},
+        "state.right_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 37, "end": 40},
         "state.right_ori_6d": {
             "type": "transform_from_origin",
             "source_key": "observation.state",
-            "start": 10,
-            "end": 13,
-            "from": "rpy",
+            "start": 30,
+            "end": 34,
+            "from": "quaternion",
             "to": "rotation_6d",
-            "convention": "XYZ",
+            "quaternion_order": "xyzw",
         },
-        "state.right_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 13, "end": 14},
-        "action.left_arm": {"type": "keep_from_origin", "source_key": "action", "start": 0, "end": 3},
+        "state.right_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 1, "end": 2},
+        "action.left_arm": {"type": "keep_from_origin", "source_key": "action", "start": 2, "end": 5},
         "action.left_ori_6d": {
             "type": "transform_from_origin",
             "source_key": "action",
-            "start": 3,
-            "end": 6,
-            "from": "rpy",
+            "start": 8,
+            "end": 12,
+            "from": "quaternion",
             "to": "rotation_6d",
-            "convention": "XYZ",
+            "quaternion_order": "xyzw",
         },
-        "action.left_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 6, "end": 7},
-        "action.right_arm": {"type": "keep_from_origin", "source_key": "action", "start": 7, "end": 10},
+        "action.left_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 0, "end": 1},
+        "action.right_arm": {"type": "keep_from_origin", "source_key": "action", "start": 5, "end": 8},
         "action.right_ori_6d": {
             "type": "transform_from_origin",
             "source_key": "action",
-            "start": 10,
-            "end": 13,
-            "from": "rpy",
+            "start": 12,
+            "end": 16,
+            "from": "quaternion",
             "to": "rotation_6d",
-            "convention": "XYZ",
+            "quaternion_order": "xyzw",
         },
-        "action.right_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 13, "end": 14},
+        "action.right_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 1, "end": 2},
     }
 
 
@@ -317,15 +311,14 @@ class FastUMIDualArmDataConfig:
 
 
 ROBOT_TYPE_CONFIG_MAP = {
-    "fastumi_dual_arm": FastUMIDualArmDataConfig(),
+    "AgiBotWolrd_data": AgiBotWolrdDataConfig(),
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
-    "fastumi_dual_arm": EmbodimentTag.NEW_EMBODIMENT,
+    "AgiBotWolrd_data": EmbodimentTag.NEW_EMBODIMENT,
 }
 
 DATASET_NAMED_MIXTURES = {
-    "my_mix": [(task, 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
-    
-    # "my_mix": [("Arrange_Toothbrush_and_Toothpaste", 1.0, "fastumi_dual_arm")],
+    # "fastumi_dual_arm": [(task, 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
+    "agi_mix": [("Arrange_Toothbrush_and_Toothpaste", 1.0, "AgiBotWolrd_data")],
 }

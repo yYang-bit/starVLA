@@ -11,16 +11,16 @@
 ###########################################################################################
 
 Framework_name=QwenGR00T
-base_vlm=playground/Pretrained_models/Qwen3.5-0.8B
+base_vlm=playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
 action_input_dim=2560
 DIT_TYPE="DiT-B"
 # oxe_data_root=/mnt/project/public/yangzhibo/umidata/lerobot
-oxe_data_root=/mnt/project/public/yangzhibo/umidata/lerobot/grouped_by_task
+oxe_data_root=/mnt/project/public/umi_data_from_web/fastumi_data_clean
 data_mix=my_mix
 run_root_dir=./playground/Checkpoints
-run_id=starvla_qwengroot_0521_full
-freeze_module_list=''
-freeze_module_list='qwen_vl_interface.model.model.visual'
+run_id=starvla_qwengroot_0610_fastumi
+# freeze_module_list=''
+freeze_module_list='qwen_vl_interface'
 # === End of environment variable configuration ===my_mix
 ###########################################################################################
 
@@ -40,7 +40,7 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 4 \
+  --datasets.vla_data.per_device_batch_size 8 \
   --trainer.freeze_modules ${freeze_module_list} \
   --trainer.max_train_steps 40000 \
   --trainer.save_interval 1000 \

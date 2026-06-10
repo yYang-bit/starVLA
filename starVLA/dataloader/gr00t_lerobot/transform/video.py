@@ -330,6 +330,95 @@ class VideoResize(VideoTransform):
             raise ValueError(f"Backend {self.backend} not supported")
 
 
+class _ResizeWithPadTorch:
+    def __init__(self, height: int, width: int, interpolation: T.InterpolationMode, antialias: bool):
+        self.height = height
+        self.width = width
+        self.interpolation = interpolation
+        self.antialias = antialias
+
+    def __call__(self, frames: torch.Tensor) -> torch.Tensor:
+        old_height, old_width = frames.shape[-2:]
+        scale = min(self.height / old_height, self.width / old_width)
+        new_height = min(self.height, max(1, round(old_height * scale)))
+        new_width = min(self.width, max(1, round(old_width * scale)))
+
+        resized = T.Resize(
+            (new_height, new_width),
+            interpolation=self.interpolation,
+            antialias=self.antialias,
+        )(frames)
+
+        pad_top = (self.height - new_height) // 2
+        pad_bottom = self.height - new_height - pad_top
+        pad_left = (self.width - new_width) // 2
+        pad_right = self.width - new_width - pad_left
+        return torch.nn.functional.pad(resized, (pad_left, pad_right, pad_top, pad_bottom), value=0.0)
+
+
+class _ResizeWithPadAlbumentations(A.ImageOnlyTransform):
+    def __init__(self, height: int, width: int, interpolation: int, p: float = 1.0):
+        super().__init__(p=p)
+        self.height = height
+        self.width = width
+        self.interpolation = interpolation
+
+    def apply(self, img: np.ndarray, **params) -> np.ndarray:
+        old_height, old_width = img.shape[:2]
+        scale = min(self.height / old_height, self.width / old_width)
+        new_height = min(self.height, max(1, round(old_height * scale)))
+        new_width = min(self.width, max(1, round(old_width * scale)))
+
+        resized = cv2.resize(img, (new_width, new_height), interpolation=self.interpolation)
+        pad_top = (self.height - new_height) // 2
+        pad_bottom = self.height - new_height - pad_top
+        pad_left = (self.width - new_width) // 2
+        pad_right = self.width - new_width - pad_left
+        return cv2.copyMakeBorder(
+            resized,
+            pad_top,
+            pad_bottom,
+            pad_left,
+            pad_right,
+            borderType=cv2.BORDER_CONSTANT,
+            value=0,
+        )
+
+
+class VideoResizeWithPad(VideoTransform):
+    height: int = Field(..., description="The target height after resize and padding")
+    width: int = Field(..., description="The target width after resize and padding")
+    interpolation: str = Field(default="linear", description="The interpolation mode")
+    antialias: bool = Field(default=True, description="Whether to apply antialiasing")
+
+    @field_validator("interpolation")
+    def validate_interpolation(cls, v):
+        cls._validate_interpolation(v)
+        return v
+
+    def get_transform(self, mode: Literal["train", "eval"] = "train") -> Callable:
+        """Resize while preserving aspect ratio, then pad with black pixels."""
+        interpolation = self._get_interpolation(self.interpolation, self.backend)
+        if interpolation is None:
+            raise ValueError(f"Interpolation mode {self.interpolation} not supported for {self.backend}")
+        if self.backend == "torchvision":
+            return _ResizeWithPadTorch(
+                height=self.height,
+                width=self.width,
+                interpolation=interpolation,
+                antialias=self.antialias,
+            )
+        elif self.backend == "albumentations":
+            return _ResizeWithPadAlbumentations(
+                height=self.height,
+                width=self.width,
+                interpolation=interpolation,
+                p=1,
+            )
+        else:
+            raise ValueError(f"Backend {self.backend} not supported")
+
+
 class VideoRandomRotation(VideoTransform):
     degrees: float | tuple[float, float] = Field(..., description="The degrees of the random rotation")
     interpolation: str = Field("linear", description="The interpolation mode")
