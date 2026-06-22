@@ -32,6 +32,135 @@ sys.path.insert(0, str(Path(__file__).parent.parent))
 from starVLA.dataloader.gr00t_lerobot.datasets import LeRobotSingleDataset
 
 
+def _read_all_parquet_data(dataset_path: Path) -> dict:
+    """Read all parquet data, grouped by trajectory_id.
+    Bypasses video decoding entirely.
+
+    Returns:
+        dict: {trajectory_id: DataFrame}
+    """
+    from starVLA.dataloader.gr00t_lerobot.datasets import (
+        LE_ROBOT3_EPISODE_FILENAME,
+        LE_ROBOT2_EPISODES_FILENAME,
+        LE_ROBOT2_DEFAULT_DATA_PATH,
+    )
+    import pandas as pd
+
+    dataset_path = Path(dataset_path)
+    trajectories = {}
+
+    # Detect version
+    v21_episodes = dataset_path / LE_ROBOT2_EPISODES_FILENAME
+    if v21_episodes.exists():
+        # v2.1: read episodes.jsonl, load each parquet
+        import json
+        with open(v21_episodes) as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                ep = json.loads(line)
+                eid = int(ep.get("episode_index", 0))
+                chunk = int(ep.get("episode_chunk", eid // 1000))
+                pq_path = dataset_path / LE_ROBOT2_DEFAULT_DATA_PATH.format(
+                    episode_chunk=chunk, episode_index=eid
+                )
+                if pq_path.exists():
+                    df = pd.read_parquet(pq_path)
+                    if "episode_index" in df.columns:
+                        df = df.loc[df["episode_index"] == eid].copy()
+                    trajectories[eid] = df.reset_index(drop=True)
+    else:
+        # v3.0: read all parquet files under data/
+        data_files = sorted(dataset_path.glob("data/*/*.parquet"))
+        for pq_path in data_files:
+            df = pd.read_parquet(pq_path)
+            if "episode_index" in df.columns:
+                for eid, sub_df in df.groupby("episode_index"):
+                    trajectories[int(eid)] = sub_df.reset_index(drop=True)
+            else:
+                trajectories[len(trajectories)] = df.reset_index(drop=True)
+
+    return trajectories
+
+
+def _build_raw_sample(traj_df, base_idx: int, chunk_size: int, modality_configs: dict, modality_meta=None):
+    """Build a raw sample dict from a trajectory DataFrame.
+
+    Slices flat parquet vectors (e.g. 'action' [20]) into structured subkeys
+    (e.g. 'action.left_pos' [3]) using modality_meta (from modality.json).
+
+    For 'action' modality: builds a chunk [chunk_size, D] starting at base_idx.
+    For 'state' modality: takes the single frame at base_idx.
+    For 'video'/'language': skipped (not needed for stats).
+
+    Args:
+        modality_meta: LeRobotModalityMetadata object (maps subkey -> original_key + start/end)
+
+    Returns:
+        dict: raw sample with subkey entries, or None if out of range.
+    """
+    import numpy as np
+
+    traj_len = len(traj_df)
+    sample = {}
+
+    if modality_meta is None:
+        return sample
+
+    for modality, cfg in modality_configs.items():
+        if modality in ("video", "language"):
+            continue
+
+        modality_meta_obj = getattr(modality_meta, modality, None)
+        if modality_meta_obj is None:
+            continue
+
+        # modality_meta_obj is a dict: {subkey: LeRobotStateActionMetadata}
+        # modality_keys are subkeys (e.g. 'action.left_pos')
+        for subkey in cfg.modality_keys:
+            # strip modality prefix to get the meta subkey
+            meta_subkey = subkey.split(".", 1)[1] if "." in subkey else subkey
+
+            field_meta = None
+            if isinstance(modality_meta_obj, dict):
+                field_meta = modality_meta_obj.get(meta_subkey)
+            else:
+                field_meta = getattr(modality_meta_obj, meta_subkey, None)
+
+            if field_meta is None:
+                continue
+
+            original_key = field_meta.original_key
+            start = field_meta.start
+            end = field_meta.end
+
+            if original_key not in traj_df.columns:
+                continue
+
+            # Get the full column as array [traj_len, D]
+            col_values = np.stack([np.asarray(v, dtype=np.float32) for v in traj_df[original_key].values])
+            # Slice to [start:end]
+            col_values = col_values[:, start:end]
+
+            if modality == "action":
+                # Build chunk [chunk_size, D]
+                end_idx = base_idx + chunk_size
+                if end_idx > traj_len:
+                    chunk = np.zeros((chunk_size, col_values.shape[-1]), dtype=np.float32)
+                    valid = traj_len - base_idx
+                    chunk[:valid] = col_values[base_idx:traj_len]
+                    chunk[valid:] = col_values[-1]
+                else:
+                    chunk = col_values[base_idx:end_idx].copy()
+                sample[subkey] = chunk
+            else:
+                # state: single frame at base_idx
+                sample[subkey] = col_values[base_idx].copy()
+
+    return sample
+
+
 def compute_statistics(
     dataset_path: Path,
     robot_type: str,
@@ -39,6 +168,9 @@ def compute_statistics(
     output_path: Path,
     sample_ratio: float = 1.0,
     action_keys_only: bool = True,
+    action_mode: str = None,
+    action_chunk_size: int = None,
+    gripper_normalization: str = None,
 ):
     """Compute dataset statistics.
 
@@ -73,32 +205,60 @@ def compute_statistics(
     # 2. Get transform pipeline WITHOUT normalization
     print(f"\n🔧 Building transform pipeline (without normalization)...")
 
+    # Build data_cfg from parameters
+    data_cfg = {}
+    if action_mode is not None:
+        data_cfg["action_mode"] = action_mode
+    if action_chunk_size is not None:
+        data_cfg["action_chunk_size"] = action_chunk_size
+    if gripper_normalization is not None:
+        data_cfg["gripper_normalization"] = gripper_normalization
+
+    print(f"   data_cfg: {data_cfg}")
+
     # Check if config has a special method for stats computation
     if hasattr(config, 'transform_for_stats'):
-        transforms = config.transform_for_stats()
-        print(f"   Using config.transform_for_stats()")
+        transforms = config.transform_for_stats(data_cfg)
+        print(f"   Using config.transform_for_stats(data_cfg)")
     elif hasattr(config, 'transform_pipeline_without_normalization'):
         transforms = config.transform_pipeline_without_normalization()
         print(f"   Using config.transform_pipeline_without_normalization()")
     else:
         # Use default transform but warn user
-        transforms = config.transform(data_cfg={})
+        transforms = config.transform(data_cfg)
         print(f"⚠️  Using default transform - may include normalization!")
         print(f"   Consider adding transform_for_stats() method to config")
 
-    # 3. Create dataset
-    print(f"\n📂 Loading dataset from {dataset_path}...")
+    # 3. Get modality configs to know how to slice flat parquet vectors into subkeys
+    modality_configs = config.modality_config(data_cfg)
+    action_chunk_size = int(data_cfg.get("action_chunk_size", 30))
+    print(f"   action_chunk_size: {action_chunk_size}")
+
+    # 3.5 Load modality metadata (maps subkey -> original_key + start/end)
+    from starVLA.dataloader.gr00t_lerobot.datasets import (
+        LE_ROBOT_MODALITY_FILENAME,
+        LE_ROBOT_INFO_FILENAME,
+        _load_lerobot_modality_metadata,
+        _build_direct_lerobot_modality_metadata,
+    )
+    modality_meta_path = dataset_path / LE_ROBOT_MODALITY_FILENAME
+    info_meta_path = dataset_path / LE_ROBOT_INFO_FILENAME
+    if modality_meta_path.exists():
+        modality_meta = _load_lerobot_modality_metadata(modality_meta_path, info_meta_path)
+        print(f"   Loaded modality metadata from {modality_meta_path}")
+    else:
+        with open(info_meta_path) as f:
+            info_meta = json.load(f)
+        modality_meta = _build_direct_lerobot_modality_metadata(modality_configs, info_meta)
+        print(f"   Built modality metadata from info.json")
+
+    # 4. Read parquet data directly (NO video decoding)
+    print(f"\n📂 Reading parquet data directly from {dataset_path}...")
     try:
-        dataset = LeRobotSingleDataset(
-            dataset_path=dataset_path,
-            modality_configs=config.modality_config(),
-            embodiment_tag=embodiment_tag,
-            transforms=transforms,
-            data_cfg={"lerobot_version": "auto"},  # Auto-detect version
-        )
-        print(f"✅ Dataset loaded: {len(dataset)} samples")
+        parquet_data = _read_all_parquet_data(dataset_path)
+        print(f"✅ Read {len(parquet_data)} trajectories from parquet")
     except Exception as e:
-        print(f"❌ Failed to load dataset: {e}")
+        print(f"❌ Failed to read parquet: {e}")
         import traceback
         traceback.print_exc()
         sys.exit(1)
@@ -108,15 +268,9 @@ def compute_statistics(
         if hasattr(config, 'action_keys'):
             keys_to_compute = config.action_keys
         else:
-            # Fallback: use all action.* keys from modality_config
-            action_config = config.modality_config().get('action')
-            if action_config:
-                keys_to_compute = action_config.output_keys or action_config.modality_keys
-            else:
-                print(f"⚠️  Could not find action keys, computing for all modalities")
-                keys_to_compute = None
+            keys_to_compute = None
     else:
-        keys_to_compute = None  # Compute for all keys
+        keys_to_compute = None
 
     print(f"\n📊 Computing statistics:")
     if keys_to_compute:
@@ -124,41 +278,44 @@ def compute_statistics(
     else:
         print(f"   Keys: All modalities")
 
-    # 5. Sample dataset
-    num_samples = int(len(dataset) * sample_ratio)
+    # 5. Sample trajectories (not samples)
+    all_traj_ids = list(parquet_data.keys())
     if sample_ratio < 1.0:
-        print(f"\n🎲 Sampling {sample_ratio*100:.1f}% of data ({num_samples} samples)")
-        indices = np.random.choice(len(dataset), num_samples, replace=False)
+        num_trajs = max(1, int(len(all_traj_ids) * sample_ratio))
+        print(f"\n🎲 Sampling {sample_ratio*100:.1f}% of trajectories ({num_trajs}/{len(all_traj_ids)})")
+        sampled_traj_ids = np.random.choice(all_traj_ids, num_trajs, replace=False).tolist()
     else:
-        indices = range(len(dataset))
+        sampled_traj_ids = all_traj_ids
 
-    # 6. Collect data
-    print(f"\n🔄 Collecting data from {num_samples} samples...")
+    # 6. Collect data: slice flat parquet vectors into subkeys, build chunks, apply transform
+    print(f"\n🔄 Collecting data from {len(sampled_traj_ids)} trajectories...")
 
     all_data = {}  # {key: list of arrays}
 
-    for idx in tqdm(indices, desc="Processing samples"):
-        try:
-            sample = dataset[idx]
+    for traj_id in tqdm(sampled_traj_ids, desc="Processing trajectories"):
+        traj_df = parquet_data[traj_id]
+        traj_len = len(traj_df)
 
-            # Extract action data
-            if 'action' in sample:
-                action = sample['action']
-                if isinstance(action, torch.Tensor):
-                    action = action.detach().cpu().numpy()
+        # Sample base indices within this trajectory (step = action_chunk_size to avoid overlap)
+        if traj_len <= action_chunk_size:
+            continue
+        num_chunks = max(1, traj_len // action_chunk_size)
+        base_indices = np.linspace(0, traj_len - action_chunk_size - 1, num_chunks, dtype=int)
 
-                # If keys_to_compute is specified, we assume action is already structured
-                # Otherwise, use the full action tensor
-                if keys_to_compute is None:
-                    # Flatten if multi-dimensional (e.g., [T, D] -> [T*D])
-                    if action.ndim > 1:
-                        action = action.reshape(-1, action.shape[-1])
-                    if 'action' not in all_data:
-                        all_data['action'] = []
-                    all_data['action'].append(action)
-                else:
-                    # This assumes sample contains structured keys already
-                    # (after DerivedKeysTransform or similar)
+        for base_idx in base_indices:
+            try:
+                # Build a raw sample dict from parquet (NO video)
+                raw_sample = _build_raw_sample(
+                    traj_df, base_idx, action_chunk_size, modality_configs, modality_meta
+                )
+                if raw_sample is None or len(raw_sample) == 0:
+                    continue
+
+                # Apply transform pipeline (ActionChunkTransform etc., no normalization)
+                sample = transforms(raw_sample)
+
+                # Extract data for keys_to_compute
+                if keys_to_compute is not None:
                     for key in keys_to_compute:
                         if key in sample:
                             value = sample[key]
@@ -166,21 +323,20 @@ def compute_statistics(
                                 value = value.detach().cpu().numpy()
                             if key not in all_data:
                                 all_data[key] = []
-                            all_data[key].append(value)
+                            all_data[key].append(np.asarray(value, dtype=np.float32))
+                else:
+                    # Use flat keys
+                    for key, value in sample.items():
+                        if isinstance(value, torch.Tensor):
+                            value = value.detach().cpu().numpy()
+                        if not isinstance(value, np.ndarray):
+                            continue
+                        if key not in all_data:
+                            all_data[key] = []
+                        all_data[key].append(np.asarray(value, dtype=np.float32))
 
-                    # If keys not found in sample, fall back to action tensor
-                    if not all_data:
-                        print(f"⚠️  Structured keys not found in sample, using flat action")
-                        if action.ndim > 1:
-                            action = action.reshape(-1, action.shape[-1])
-                        if 'action' not in all_data:
-                            all_data['action'] = []
-                        all_data['action'].append(action)
-                        keys_to_compute = None
-
-        except Exception as e:
-            print(f"\n⚠️  Skipping sample {idx}: {e}")
-            continue
+            except Exception as e:
+                continue
 
     if not all_data:
         print(f"\n❌ No data collected! Check transform pipeline and sample extraction.")
@@ -234,7 +390,7 @@ def compute_statistics(
     print(f"  Summary")
     print(f"{'='*60}")
     print(f"  Dataset: {dataset_path.name}")
-    print(f"  Samples: {num_samples} ({sample_ratio*100:.1f}% of total)")
+    print(f"  Trajectories sampled: {len(sampled_traj_ids)} ({sample_ratio*100:.1f}% of total)")
     print(f"  Keys: {len(stats)}")
     print(f"  Output: {output_path}")
     print(f"{'='*60}\n")
@@ -247,19 +403,23 @@ def main():
         epilog="""
 Examples:
 
-  # Galbot dataset
+  # Galbot dataset with delta mode
   python compute_dataset_stats.py \\
       --dataset_path /path/to/galbot_data \\
-      --robot_type galbot_bimanual \\
+      --robot_type galbot_bimanual_self \\
       --data_registry examples.GalbotBimanualRelative.train_files.data_registry.data_config \\
-      --output /path/to/galbot_data/meta/stats_delta_chunk30.json
+      --output /path/to/galbot_data/meta/stats_delta_chunk30.json \\
+      --action_mode delta \\
+      --action_chunk_size 30
 
-  # FastUMI dataset (large, use sampling)
+  # FastUMI dataset with relative_pose mode (large dataset, use sampling)
   python compute_dataset_stats.py \\
       --dataset_path /path/to/fastumi_data/Add_Rice_to_Rice_Cooker \\
       --robot_type fastumi_dual_arm \\
       --data_registry examples.FastUMI.train_files.data_registry.data_config \\
-      --output /path/to/fastumi_data/Add_Rice_to_Rice_Cooker/meta/stats.json \\
+      --output /path/to/fastumi_data/Add_Rice_to_Rice_Cooker/meta/stats_relative_pose_chunk16.json \\
+      --action_mode relative_pose \\
+      --action_chunk_size 16 \\
       --sample_ratio 0.1
         """
     )
@@ -305,6 +465,28 @@ Examples:
         help="Compute stats for all keys, not just actions"
     )
 
+    parser.add_argument(
+        "--action_mode",
+        type=str,
+        default=None,
+        help="Action mode: abs, delta, or relative_pose (default: use config default)"
+    )
+
+    parser.add_argument(
+        "--action_chunk_size",
+        type=int,
+        default=None,
+        help="Action chunk size (default: use config default)"
+    )
+
+    parser.add_argument(
+        "--gripper_normalization",
+        type=str,
+        default=None,
+        choices=["binary", "min_max", "none"],
+        help="Gripper normalization method (default: None)"
+    )
+
     args = parser.parse_args()
 
     # Validate inputs
@@ -324,6 +506,9 @@ Examples:
         output_path=args.output,
         sample_ratio=args.sample_ratio,
         action_keys_only=not args.all_keys,
+        action_mode=args.action_mode,
+        action_chunk_size=args.action_chunk_size,
+        gripper_normalization=args.gripper_normalization if args.gripper_normalization != "none" else None,
     )
 
 

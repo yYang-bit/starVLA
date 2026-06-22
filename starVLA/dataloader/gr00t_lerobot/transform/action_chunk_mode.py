@@ -136,6 +136,9 @@ class ActionChunkTransform(ModalityTransform):
 
         # Convert rotation_6d to rotation matrix
         rot_mat = rot6d_to_matrix(rot_chunk)  # [T, 3, 3]
+        # Convert to tensor if input was tensor
+        if isinstance(rot_chunk, torch.Tensor):
+            rot_mat = torch.from_numpy(rot_mat).to(dtype=pos_chunk.dtype, device=pos_chunk.device)
 
         # Compute frame-to-frame delta
         for t in range(T - 1, 0, -1):
@@ -174,6 +177,9 @@ class ActionChunkTransform(ModalityTransform):
         # Base frame (action[0])
         base_pos = pos_chunk[0]  # [3]
         base_rot = rot6d_to_matrix(rot_chunk[0])  # [3, 3]
+        # Convert to tensor if input was tensor
+        if isinstance(rot_chunk, torch.Tensor):
+            base_rot = torch.from_numpy(base_rot).to(dtype=pos_chunk.dtype, device=pos_chunk.device)
         base_rot_inv = base_rot.T
 
         # World frame offset
@@ -204,6 +210,9 @@ class ActionChunkTransform(ModalityTransform):
         """
         # Convert to rotation matrix
         rot_mat = rot6d_to_matrix(rot_chunk)  # [T, 3, 3]
+        # Convert to tensor if input was tensor
+        if isinstance(rot_chunk, torch.Tensor):
+            rot_mat = torch.from_numpy(rot_mat).to(dtype=rot_chunk.dtype, device=rot_chunk.device)
         T = rot_mat.shape[0]
 
         delta_mat = torch.zeros_like(rot_mat)
@@ -222,7 +231,11 @@ class ActionChunkTransform(ModalityTransform):
         )
 
         # Convert back to rotation_6d
-        return matrix_to_rot6d(delta_mat)
+        result = matrix_to_rot6d(delta_mat)
+        # Convert to tensor if input was tensor
+        if isinstance(rot_chunk, torch.Tensor):
+            result = torch.from_numpy(result).to(dtype=rot_chunk.dtype, device=rot_chunk.device)
+        return result
 
     def _relative_rotation(
         self,
@@ -243,6 +256,9 @@ class ActionChunkTransform(ModalityTransform):
         """
         # Convert to rotation matrix
         rot_mat = rot6d_to_matrix(rot_chunk)  # [T, 3, 3]
+        # Convert to tensor if input was tensor
+        if isinstance(rot_chunk, torch.Tensor):
+            rot_mat = torch.from_numpy(rot_mat).to(dtype=rot_chunk.dtype, device=rot_chunk.device)
 
         # Base frame rotation (action[0])
         base_rot = rot_mat[0]  # [3, 3]
@@ -253,7 +269,11 @@ class ActionChunkTransform(ModalityTransform):
         rel_mat = torch.einsum("ij,tjk->tik", base_rot_inv, rot_mat)
 
         # Convert back to rotation_6d
-        return matrix_to_rot6d(rel_mat)
+        result = matrix_to_rot6d(rel_mat)
+        # Convert to tensor if input was tensor
+        if isinstance(rot_chunk, torch.Tensor):
+            result = torch.from_numpy(result).to(dtype=rot_chunk.dtype, device=rot_chunk.device)
+        return result
 
     def apply(self, data: dict[str, Any]) -> dict[str, Any]:
         """

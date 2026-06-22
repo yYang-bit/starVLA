@@ -46,6 +46,9 @@ from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
     StateActionToTensor,
     StateActionTransform,
 )
+from examples.GalbotBimanualRelative.train_files.data_registry.binary_gripper_transform import (
+    BinaryGripperTransform,
+)
 
 
 class GalbotBimanualSelfDataConfig:
@@ -131,19 +134,35 @@ class GalbotBimanualSelfDataConfig:
         gripper_norm = cfg.get("gripper_normalization", self.default_gripper_normalization)
         if gripper_norm is not None:
             gripper_norm = str(gripper_norm).lower()
-            if gripper_norm not in {"binary", "min_max"}:
-                raise ValueError(f"gripper_normalization must be None|'binary'|'min_max', got {gripper_norm!r}")
+            if gripper_norm not in {"binary", "binary_independent", "min_max"}:
+                raise ValueError(
+                    f"gripper_normalization must be None|'binary'|'binary_independent'|'min_max', "
+                    f"got {gripper_norm!r}"
+                )
 
         gripper_binary_threshold = float(cfg.get("gripper_binary_threshold", self.default_gripper_binary_threshold))
 
-        # Build normalization modes
+        # --- gripper handling strategy ---
+        # "binary_independent" (本任务专用): gripper 不走 StateActionTransform 归一化,
+        #   保持真值穿过 normalization，末尾用独立的 BinaryGripperTransform 做阈值二值化。
+        #   这样 stats.json 仍按真值统计 gripper，可供大规模预训练复用。
+        # "binary" (框架原生): 走 StateActionTransform 的 binary 归一化，需要 stats 校验。
+        # "min_max": 走框架 min_max 归一化。
+        # None: gripper 不归一化，保持真值。
+        gripper_keys = [
+            "action.left_gripper",
+            "action.right_gripper",
+        ]
+        use_independent_binarization = (gripper_norm == "binary_independent")
+
+        # Build normalization modes (gripper excluded if using independent binarization)
         action_norm_modes = {
             "action.left_pos":      "q99",
             "action.right_pos":     "q99",
         }
 
-        # Add gripper normalization if specified
-        if gripper_norm is not None:
+        # Add gripper normalization if specified (and not independent binarization)
+        if gripper_norm is not None and not use_independent_binarization:
             action_norm_modes["action.left_gripper"] = gripper_norm
             action_norm_modes["action.right_gripper"] = gripper_norm
 
@@ -180,6 +199,15 @@ class GalbotBimanualSelfDataConfig:
                 normalization_modes=state_norm_modes,
             ),
         ])
+
+        # Independent gripper binarization (本任务专用，放在 normalization 之后)
+        if use_independent_binarization:
+            transforms.append(
+                BinaryGripperTransform(
+                    apply_to=gripper_keys,
+                    threshold=gripper_binary_threshold,
+                )
+            )
 
         return ComposedModalityTransform(transforms=transforms)
 

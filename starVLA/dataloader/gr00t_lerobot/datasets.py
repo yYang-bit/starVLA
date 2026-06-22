@@ -207,8 +207,11 @@ def _load_lerobot_modality_metadata(
                 continue
 
             feature = features[original_key]
-            field_payload["start"] = 0
-            field_payload["end"] = _infer_feature_width(feature, original_key)
+            # Preserve explicit start/end slices from modality.json. Only fill them
+            # from info.json when absent; otherwise structured subkeys like
+            # action.left_pos would incorrectly expand to the full flat action width.
+            field_payload.setdefault("start", 0)
+            field_payload.setdefault("end", _infer_feature_width(feature, original_key))
             field_payload["dtype"] = feature.get("dtype", field_payload.get("dtype", "float32"))
 
     return LeRobotModalityMetadata.model_validate(payload)
@@ -1494,7 +1497,7 @@ class LeRobotSingleDataset(Dataset):
                         "data/file_from_index": index,
                         "videos/from_timestamps": from_timestamps,
                     }
-                self.trajectory_ids_to_metadata[trajectory_ids[-1]] = episode_meta
+                    self.trajectory_ids_to_metadata[episode["episode_index"]] = episode_meta
 
         return np.array(trajectory_ids), np.array(trajectory_lengths)
 

@@ -15,11 +15,21 @@ config_yaml=examples/GalbotBimanualRelative/train_files/starvla_qwengroot_galbot
 run_root_dir=/mnt/home/liuyi/project/starVLA/Checkpoints/galbot_delta_action
 run_id=galbot_bimanual_self_$(date +%m%d)
 
-# === Self-mode config (change self_mode to switch experiment) ===
-self_mode=delta           # abs | delta | chunk_relative
+# === Action mode config (统一: abs | delta | relative_pose) ===
+action_mode=delta              # abs | delta | relative_pose
+action_chunk_size=30           # action horizon, 需与 stats 计算时一致
 
-# === Stats path (default: <data_root>/<data_name>/meta/stats.json) ===
-stats_path=${data_root}/${data_name}/meta/stats.json  #指定lerobot数据集stats路径，默认是meta/stats.json
+# === Gripper config ===
+# binary_independent: 本任务专用, gripper 不走归一化, 末尾用阈值二值化 (x > threshold -> {0,1})
+# binary: 走框架 StateActionTransform binary 归一化 (需 stats 校验)
+# min_max: min_max 归一化
+# none: 不处理, 保持真值
+gripper_normalization=binary_independent
+gripper_binary_threshold=100.0   # mm, 二值化阈值
+
+# === Stats path (与 action_mode / action_chunk_size 对应) ===
+stats_file="stats_${action_mode}_chunk${action_chunk_size}.json"
+stats_path=${data_root}/${data_name}/meta/${stats_file}
 
 # === End of environment variable configuration ===
 ###########################################################################################
@@ -28,10 +38,19 @@ output_dir=${run_root_dir}/${run_id}
 mkdir -p ${output_dir}
 cp $0 ${output_dir}/
 
-# Build optional stats_path argument
-stats_path_arg=""
-if [ -n "${stats_path:-}" ]; then
-  stats_path_arg="--datasets.vla_data.stats_path ${stats_path}"
+# Check stats file
+if [ ! -f "${stats_path}" ]; then
+  echo "⚠️  Stats file not found: ${stats_path}"
+  echo "   Please run first:"
+  echo "   python scripts/compute_dataset_stats.py \\"
+  echo "       --dataset_path ${data_root}/${data_name} \\"
+  echo "       --robot_type galbot_bimanual_self \\"
+  echo "       --data_registry examples.GalbotBimanualRelative.train_files.data_registry.data_config \\"
+  echo "       --output ${stats_path} \\"
+  echo "       --action_mode ${action_mode} \\"
+  echo "       --action_chunk_size ${action_chunk_size} \\"
+  echo "       --gripper_normalization none"
+  exit 1
 fi
 
 # Auto-log to checkpoint dir
@@ -47,15 +66,17 @@ accelerate launch \
   --datasets.vla_data.data_name ${data_name} \
   --datasets.vla_data.data_mix ${data_mix} \
   --datasets.vla_data.per_device_batch_size 8 \
-  --datasets.vla_data.self_mode ${self_mode} \
-  --datasets.vla_data.gripper_normalization binary \
+  --datasets.vla_data.action_mode ${action_mode} \
+  --datasets.vla_data.action_chunk_size ${action_chunk_size} \
+  --datasets.vla_data.gripper_normalization ${gripper_normalization} \
+  --datasets.vla_data.gripper_binary_threshold ${gripper_binary_threshold} \
+  --datasets.vla_data.stats_path ${stats_path} \
   --trainer.max_train_steps 80000 \
   --trainer.save_interval 10000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
-  ${stats_path_arg} \
   2>&1 | tee ${train_log}
 
 
@@ -71,7 +92,10 @@ accelerate launch \
 #   --config_yaml ${config_yaml} \
 #   --datasets.vla_data.data_root_dir ${data_root} \
 #   --datasets.vla_data.data_mix ${data_mix} \
-#   --datasets.vla_data.self_mode ${self_mode} \
+#   --datasets.vla_data.action_mode ${action_mode} \
+#   --datasets.vla_data.action_chunk_size ${action_chunk_size} \
+#   --datasets.vla_data.gripper_normalization ${gripper_normalization} \
+#   --datasets.vla_data.stats_path ${stats_path} \
 #   --run_root_dir ${run_root_dir} \
 #   --run_id ${run_id} \
 #   --wandb_project starVLA_galbot \
