@@ -71,8 +71,8 @@ accelerate launch \
   --datasets.vla_data.gripper_normalization ${gripper_normalization} \
   --datasets.vla_data.gripper_binary_threshold ${gripper_binary_threshold} \
   --datasets.vla_data.stats_path ${stats_path} \
-  --trainer.max_train_steps 100 \
-  --trainer.save_interval 10000 \
+  --trainer.max_train_steps 80000 \
+  --trainer.save_interval 5000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
   --run_root_dir ${run_root_dir} \
