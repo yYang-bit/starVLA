@@ -266,7 +266,14 @@ def compute_statistics(
     # 4. Determine which keys to compute stats for
     if action_keys_only:
         if hasattr(config, 'action_keys'):
-            keys_to_compute = config.action_keys
+            keys_to_compute = list(config.action_keys)
+            # Include normalized state keys when present (e.g., dual_relative_pose_pos)
+            # so training can load state statistics from the same stats cache.
+            state_norm_keys = []
+            if hasattr(config, 'state_keys'):
+                # By convention rot6d keys are not normalized; pos keys usually are.
+                state_norm_keys = [k for k in config.state_keys if k.endswith('_pos')]
+            keys_to_compute.extend(state_norm_keys)
         else:
             keys_to_compute = None
     else:
@@ -360,14 +367,23 @@ def compute_statistics(
 
         print(f"      Shape: {concatenated.shape}")
 
+        # Ensure 2D [N, D] before statistics; single-frame state vectors may
+        # concatenate to [N*D], so reshape them using the first sample width.
+        if concatenated.ndim == 1:
+            first_width = np.asarray(data_list[0]).reshape(-1).shape[-1]
+            if first_width > 1 and concatenated.size % first_width == 0:
+                concatenated = concatenated.reshape(-1, first_width)
+            else:
+                concatenated = concatenated.reshape(-1, 1)
+
         # Compute stats
         key_stats = {
-            "mean": np.mean(concatenated, axis=0).tolist(),
-            "std": np.std(concatenated, axis=0).tolist(),
-            "min": np.min(concatenated, axis=0).tolist(),
-            "max": np.max(concatenated, axis=0).tolist(),
-            "q01": np.quantile(concatenated, 0.01, axis=0).tolist(),
-            "q99": np.quantile(concatenated, 0.99, axis=0).tolist(),
+            "mean": np.asarray(np.mean(concatenated, axis=0)).reshape(-1).tolist(),
+            "std": np.asarray(np.std(concatenated, axis=0)).reshape(-1).tolist(),
+            "min": np.asarray(np.min(concatenated, axis=0)).reshape(-1).tolist(),
+            "max": np.asarray(np.max(concatenated, axis=0)).reshape(-1).tolist(),
+            "q01": np.asarray(np.quantile(concatenated, 0.01, axis=0)).reshape(-1).tolist(),
+            "q99": np.asarray(np.quantile(concatenated, 0.99, axis=0)).reshape(-1).tolist(),
         }
 
         # Print summary

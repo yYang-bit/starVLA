@@ -67,19 +67,22 @@ def test_action_chunk_transform():
             "gripper_normalization": None,  # Use raw values
         }
 
-        # Create dataset (no stats, so no normalization will actually happen)
+        # Create dataset with only 3 episodes
         try:
             dataset = LeRobotSingleDataset(
                 dataset_path=dataset_path,
                 modality_configs=config.modality_config(data_cfg),
                 embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,  # Use generic tag
                 transforms=config.transform_for_stats(data_cfg),  # No normalization
+                episodes=[0, 1, 2],  # Only load 3 episodes!
             )
         except Exception as e:
             print(f"❌ Failed to create dataset for mode={mode}: {e}")
             continue
 
-        # Sample one item
+        print(f"✅ Dataset created with {len(dataset)} samples from 3 episodes")
+
+        # Sample first item
         try:
             sample = dataset[0]
         except Exception as e:

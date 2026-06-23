@@ -55,13 +55,15 @@ def test_fastumi_lightweight():
 
         print(f"配置: {data_cfg}")
 
-        # 创建数据集（使用 transform_for_stats，无归一化）
+        # 创建数据集（不使用 stats，跳过归一化）
         try:
             dataset = LeRobotSingleDataset(
                 dataset_path=dataset_path,
                 modality_configs=config.modality_config(data_cfg),
                 embodiment_tag=EmbodimentTag.NEW_EMBODIMENT,
                 transforms=config.transform_for_stats(data_cfg),
+                # 跳过 stats 加载
+                delta_timestamps={"action": [0]},  # 简化配置
             )
             print(f"✅ 数据集创建成功，总样本数: {len(dataset)}")
         except Exception as e:

@@ -130,6 +130,12 @@ class _QWen_VL_Interface(nn.Module):
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 
+        # Qwen2.5-VL config may not expose top-level hidden_size in newer
+        # transformers versions; mirror text_config.hidden_size for downstream
+        # action heads that read model.config.hidden_size.
+        if not hasattr(model.config, "hidden_size") and hasattr(model.config, "text_config"):
+            model.config.hidden_size = model.config.text_config.hidden_size
+
         self.model = model
         self.processor = processor
         self.config = config

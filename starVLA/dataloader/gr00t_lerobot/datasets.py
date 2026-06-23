@@ -1356,9 +1356,43 @@ class LeRobotSingleDataset(Dataset):
             for our_modality in ["state", "action"]:
                 for subkey in simplified_modality_meta[our_modality]:
                     dataset_statistics[our_modality][subkey] = {}
-                    state_action_meta = le_modality_meta.get_key_meta(f"{our_modality}.{subkey}")
+                    full_key = f"{our_modality}.{subkey}"
+                    state_action_meta = le_modality_meta.get_key_meta(full_key)
                     assert isinstance(state_action_meta, LeRobotStateActionMetadata)
+
+                    # Statistics can be stored in two layouts:
+                    # 1) legacy/raw layout keyed by original parquet column, e.g. "action"
+                    #    with full flat-vector stats, then sliced by modality.json start/end;
+                    # 2) structured layout keyed by full modality key, e.g. "action.left_pos",
+                    #    already matching the transformed subkey shape. The new offline stats
+                    #    script writes this layout for action_mode=delta/relative_pose.
+                    if full_key in le_statistics:
+                        for stat_name, stat_value in le_statistics[full_key].items():
+                            dataset_statistics[our_modality][subkey][stat_name] = np.asarray(stat_value).tolist()
+                        continue
+
+                    if subkey in le_statistics:
+                        for stat_name, stat_value in le_statistics[subkey].items():
+                            dataset_statistics[our_modality][subkey][stat_name] = np.asarray(stat_value).tolist()
+                        continue
+
                     le_modality = state_action_meta.original_key
+                    if le_modality not in le_statistics:
+                        # Some keys (e.g. rotation_6d state inputs) may intentionally be
+                        # unnormalized and therefore absent from a structured stats cache.
+                        # Populate safe identity stats so metadata validation can proceed;
+                        # StateActionTransform will ignore these keys unless requested in
+                        # normalization_modes.
+                        shape = state_action_meta.end - state_action_meta.start
+                        dataset_statistics[our_modality][subkey] = {
+                            "mean": [0.0] * shape,
+                            "std": [1.0] * shape,
+                            "min": [-1.0] * shape,
+                            "max": [1.0] * shape,
+                            "q01": [-1.0] * shape,
+                            "q99": [1.0] * shape,
+                        }
+                        continue
                     for stat_name in le_statistics[le_modality]:
                         indices = np.arange(
                             state_action_meta.start,

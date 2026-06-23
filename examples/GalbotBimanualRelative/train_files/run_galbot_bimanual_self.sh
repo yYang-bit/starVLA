@@ -65,13 +65,13 @@ accelerate launch \
   --datasets.vla_data.data_root_dir ${data_root} \
   --datasets.vla_data.data_name ${data_name} \
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 8 \
+  --datasets.vla_data.per_device_batch_size 10 \
   --datasets.vla_data.action_mode ${action_mode} \
   --datasets.vla_data.action_chunk_size ${action_chunk_size} \
   --datasets.vla_data.gripper_normalization ${gripper_normalization} \
   --datasets.vla_data.gripper_binary_threshold ${gripper_binary_threshold} \
   --datasets.vla_data.stats_path ${stats_path} \
-  --trainer.max_train_steps 80000 \
+  --trainer.max_train_steps 100 \
   --trainer.save_interval 10000 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
