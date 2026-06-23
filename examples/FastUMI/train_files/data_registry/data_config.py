@@ -36,8 +36,6 @@ from starVLA.dataloader.gr00t_lerobot.transform.state_action import (
     StateActionTransform,
 )
 from starVLA.dataloader.gr00t_lerobot.transform.video import (
-    VideoColorJitter,
-    VideoCrop,
     VideoResize,
     VideoToNumpy,
     VideoToTensor,
@@ -345,12 +343,14 @@ class FastUMIDualArmDataConfig:
         }
 
     def video_transforms(self):
-        """Video preprocessing transforms."""
+        """Video preprocessing transforms.
+
+        Keep preprocessing consistent across datasets: direct resize only,
+        no crop, no padding, no color jitter.
+        """
         return [
             VideoToTensor(apply_to=self.video_keys),
-            VideoCrop(apply_to=self.video_keys, scale=0.95),
             VideoResize(apply_to=self.video_keys, height=224, width=224, interpolation="linear"),
-            VideoColorJitter(apply_to=self.video_keys, brightness=0.3, contrast=0.4, saturation=0.5, hue=0.08),
             VideoToNumpy(apply_to=self.video_keys),
         ]
 
