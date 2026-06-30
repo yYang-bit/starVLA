@@ -325,7 +325,5 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 DATASET_NAMED_MIXTURES = {
-    "my_mix": [(task, 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
-    
-    # "my_mix": [("Arrange_Toothbrush_and_Toothpaste", 1.0, "fastumi_dual_arm")],
+    "fastumi_data": [(f"fastumi_data_clean/{task}", 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
 }

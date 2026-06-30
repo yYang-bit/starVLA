@@ -230,12 +230,11 @@ class MyDataConfig:
         },
     }
 
-    action_position_normalization_mode = "min_max"
 
     normalization_modes = {
-        "action.left_arm": action_position_normalization_mode,
+        "action.left_arm": "q99",
         "action.left_gripper": "min_max",
-        "action.right_arm": action_position_normalization_mode,
+        "action.right_arm": "q99",
         "action.right_gripper": "min_max",
     }
 
@@ -331,7 +330,7 @@ ROBOT_TYPE_TO_EMBODIMENT_TAG = {
 }
 
 DATASET_NAMED_MIXTURES = {
-    "mymy_mix": [
-        ("unknown", 1.0, "my_robot"),
+    "my_data": [
+        ("0625_pure_data", 1.0, "my_robot"),
     ],
 }

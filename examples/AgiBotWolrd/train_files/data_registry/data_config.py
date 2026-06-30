@@ -22,22 +22,6 @@ from starVLA.dataloader.gr00t_lerobot.transform.video import (
 )
 
 
-FASTUMI_DUAL_ARM_TASKS = [
-    "Add_Rice_to_Rice_Cooker",
-    "Arrange_Toothbrush_and_Toothpaste",
-    "Clean_Desktop",
-    "Dispose_of_Desktop_Debris",
-    "Fold_the_Jeans",
-    "Fold_the_Suit",
-    "Fold_the_T-shirt",
-    "Open_Double_Door_Cabinet",
-    "Open_Double_Door_Shoe_Cabinet",
-    "Pack_Skincare_Products",
-    "Place_Pot_on_Induction_Cooktop",
-    "Place_Shoes_and_Close_Shoe_Cabinet",
-    "Pour_Water_into_Teacup",
-]
-
 
 class DerivedKeysTransform(ModalityTransform):
     """Create output keys from raw keys using keep_from_origin / transform_from_origin specs."""
@@ -168,30 +152,30 @@ class AgiBotWolrdDataConfig:
     language_keys = ["annotation.human.action.task_description"]
 
     observation_indices = [0]
-    action_indices = list(range(0, 32, 2))
+    action_indices = list(range(0, 48, 3))
     state_indices = [0]
 
     derived_keys = {
-        "state.left_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 34, "end": 37},
+        "state.left_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 2, "end": 5},
         "state.left_ori_6d": {
             "type": "transform_from_origin",
             "source_key": "observation.state",
-            "start": 26,
-            "end": 30,
+            "start": 8,
+            "end": 12,
             "from": "quaternion",
             "to": "rotation_6d",
-            "quaternion_order": "xyzw",
+            "quaternion_order": "wxyz",
         },
         "state.left_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 0, "end": 1},
-        "state.right_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 37, "end": 40},
+        "state.right_arm": {"type": "keep_from_origin", "source_key": "observation.state", "start": 5, "end": 8},
         "state.right_ori_6d": {
             "type": "transform_from_origin",
             "source_key": "observation.state",
-            "start": 30,
-            "end": 34,
+            "start": 12,
+            "end": 16,
             "from": "quaternion",
             "to": "rotation_6d",
-            "quaternion_order": "xyzw",
+            "quaternion_order": "wxyz",
         },
         "state.right_gripper": {"type": "keep_from_origin", "source_key": "observation.state", "start": 1, "end": 2},
         "action.left_arm": {"type": "keep_from_origin", "source_key": "action", "start": 2, "end": 5},
@@ -202,7 +186,7 @@ class AgiBotWolrdDataConfig:
             "end": 12,
             "from": "quaternion",
             "to": "rotation_6d",
-            "quaternion_order": "xyzw",
+            "quaternion_order": "wxyz",
         },
         "action.left_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 0, "end": 1},
         "action.right_arm": {"type": "keep_from_origin", "source_key": "action", "start": 5, "end": 8},
@@ -213,7 +197,7 @@ class AgiBotWolrdDataConfig:
             "end": 16,
             "from": "quaternion",
             "to": "rotation_6d",
-            "quaternion_order": "xyzw",
+            "quaternion_order": "wxyz",
         },
         "action.right_gripper": {"type": "keep_from_origin", "source_key": "action", "start": 1, "end": 2},
     }
@@ -315,10 +299,16 @@ ROBOT_TYPE_CONFIG_MAP = {
 }
 
 ROBOT_TYPE_TO_EMBODIMENT_TAG = {
-    "AgiBotWolrd_data": EmbodimentTag.NEW_EMBODIMENT,
+    "AgiBotWolrd_data": EmbodimentTag.AGIBOT_GENIE1,
 }
 
 DATASET_NAMED_MIXTURES = {
-    # "fastumi_dual_arm": [(task, 1.0, "fastumi_dual_arm") for task in FASTUMI_DUAL_ARM_TASKS],
-    "agi_mix": [("Arrange_Toothbrush_and_Toothpaste", 1.0, "AgiBotWolrd_data")],
+    "agi_data": [
+        (str(dataset_path), 1.0, "AgiBotWolrd_data")
+        for dataset_path in sorted(
+            __import__("pathlib").Path(
+                "/mnt/project/public/umi_data_from_web/AgiBotWorld2026_v21_converted_wxyz/RichInteraction"
+            ).glob("*/task_*/*/data")
+        )
+    ],
 }

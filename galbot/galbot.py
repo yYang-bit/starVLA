@@ -274,7 +274,6 @@ def inverse_action(action_chunk: np.ndarray, proprio: np.ndarray) -> np.ndarray:
 
 
 def run_inference(obs_dict: dict, policy, task_instruction: str, action_norm_stats, show_video: VideoStreamer) -> dict:
-
     images = obs_dict["images"]
 
     print('1111',images['left_arm_camera'].shape)  # List[np.ndarray], (H, W, 3), uint8
@@ -325,9 +324,9 @@ def main():
     policy_host = "0.0.0.0"
     policy_port = 8888
     video_port = 7777
-    task_instruction = "Hold the cups in your hand, and finally stack the two cups"
-    action_stats_path = "/mnt/project/public/yangzhibo/umidata/lerobot/20260521/meta/relative_stats.json"
-    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/starvla_qwengroot_0521_full/checkpoints/steps_10000_pytorch_model.pt"
+    task_instruction = "Grasp the red bottle with your left hand and move it to the center then grasp the red bottle with your right hand and place it into the yellow basket"
+    action_stats_path = "/mnt/project/public/yangzhibo/umidata/lerobot/galbot_eef/combine_pureData50_changbi50/meta/relative_stats.json"
+    ckpt_path = "/mnt/home/yangzhibo/starVLA/playground/Checkpoints/0624_grasp_cup/checkpoints/steps_5000_pytorch_model.pt"
     use_bf16 = False
 
     # ------ ✅ Real code: load normalization statistics (dual-arm 14D) ------
