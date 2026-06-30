@@ -130,6 +130,17 @@ class _QWen_VL_Interface(nn.Module):
         processor = AutoProcessor.from_pretrained(model_id)
         processor.tokenizer.padding_side = "left"
 
+        hidden_size = getattr(model.config, "hidden_size", None)
+        text_config = getattr(model.config, "text_config", None)
+        if hidden_size is None and text_config is not None:
+            hidden_size = getattr(text_config, "hidden_size", None)
+        if hidden_size is None:
+            raise AttributeError(
+                "Unable to infer Qwen2.5-VL hidden size from model.config.hidden_size "
+                "or model.config.text_config.hidden_size."
+            )
+        model.config.hidden_size = hidden_size
+
         self.model = model
         self.processor = processor
         self.config = config

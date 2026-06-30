@@ -62,7 +62,7 @@ def build_dataloader(
             vla_dataset,
             batch_size=cfg.datasets.vla_data.per_device_batch_size,
             collate_fn=chosen_collate_fn,
-            num_workers=8,
+            num_workers=2,
             # shuffle=True
         )
         if (dist.is_initialized() and dist.get_rank() == 0) or not dist.is_initialized():

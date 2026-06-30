@@ -1,3 +1,5 @@
+set -o pipefail
+
 # export NCCL_SOCKET_IFNAME=bond0
 # export NCCL_IB_HCA=mlx5_2,mlx5_3
 
@@ -14,13 +16,13 @@ Framework_name=QwenGR00T
 base_vlm=playground/Pretrained_models/Qwen2.5-VL-3B-Instruct
 action_input_dim=2560
 DIT_TYPE="DiT-B"
-# oxe_data_root=/mnt/project/public/yangzhibo/umidata/lerobot
-oxe_data_root=/mnt/project/public/umi_data_from_web/fastumi_data_clean
-data_mix=my_mix
+oxe_data_root=/mnt/project/public/yangzhibo/umidata/lerobot/galbot_eef
+# oxe_data_root=/mnt/project/public/umi_data_from_web
+data_mix=my_data
 run_root_dir=./playground/Checkpoints
-run_id=starvla_qwengroot_0610_fastumi
-# freeze_module_list=''
-freeze_module_list='qwen_vl_interface'
+run_id=0624_grasp_cup
+pretrained_checkpoint=./playground/Checkpoints/starvla_qwengroot_combine_FastUMi_AgiBot_full_tune/checkpoints/steps_10000_pytorch_model.pt
+# freeze_module_list='qwen_vl_interface'
 # === End of environment variable configuration ===my_mix
 ###########################################################################################
 
@@ -28,6 +30,9 @@ output_dir=${run_root_dir}/${run_id}
 mkdir -p ${output_dir}
 cp $0 ${output_dir}/
 # export WANDB_MODE=enable
+
+
+log_file=${output_dir}/train.log
 
 accelerate launch \
   --config_file starVLA/config/deepseeds/deepspeed_zero2.yaml \
@@ -40,16 +45,18 @@ accelerate launch \
   --framework.action_model.action_model_type ${DIT_TYPE} \
   --datasets.vla_data.data_root_dir ${oxe_data_root}\
   --datasets.vla_data.data_mix ${data_mix} \
-  --datasets.vla_data.per_device_batch_size 8 \
-  --trainer.freeze_modules ${freeze_module_list} \
-  --trainer.max_train_steps 40000 \
-  --trainer.save_interval 1000 \
+  --datasets.vla_data.video_backend torchvision_av \
+  --datasets.vla_data.per_device_batch_size 4 \
+  --trainer.max_train_steps 10000 \
+  --trainer.save_interval 500 \
   --trainer.logging_frequency 100 \
   --trainer.eval_interval 100 \
+  --trainer.is_resume False \
+  --trainer.pretrained_checkpoint ${pretrained_checkpoint} \
   --run_root_dir ${run_root_dir} \
   --run_id ${run_id} \
   --wandb_project starVLA \
-  --wandb_entity zhiboyyy-galbot-aps  \
+  --wandb_entity zhiboyyy-galbot-aps 2>&1 | tee "${log_file}"
   # --is_debug True
 
 
@@ -72,4 +79,3 @@ accelerate launch \
 #   --run_id ${run_id} \
 #   --wandb_project your_project \
 #   --wandb_entity your_name
-
